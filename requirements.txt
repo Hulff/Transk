@@ -1,0 +1,10 @@
+whisperx
+pyannote.audio
+torch
+torchaudio
+pyyaml
+numpy
+streamlit
+typer
+speechbrain
+accelerate

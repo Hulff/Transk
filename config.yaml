@@ -1,0 +1,83 @@
+output:
+  formats: ["txt", "json", "srt"]
+  output_dir: "resultados"
+
+whisper:
+  model: "large-v2"
+  language: "en"
+  device: "cuda"
+  compute_type: "float16"
+
+diarization:
+  hf_token: "huggingface_token"   
+  min_speakers: null
+  max_speakers: null
+
+speaker_mapping:
+  similarity_threshold: 0.75
+  voice_profiles_dir: "models/voice_profiles"
+
+scene_analysis:
+  enabled: true
+  mode: "fala"
+  frame_interval_seconds: 5
+  frames_per_fala: 5
+  padding_seconds: 0.5
+
+  # Modelo multimodal
+  model: "Qwen/Qwen2.5-VL-7B-Instruct"
+
+  # Idioma da descrição gerada pelo Qwen
+  language: "en-US"
+
+  # Parâmetros de geração
+  max_new_tokens: 80
+  repetition_penalty: 1.15
+  no_repeat_ngram_size: 3
+  do_sample: false
+
+  question: |
+    Analise os frames do vídeo em conjunto.
+
+    O diálogo falado durante esta cena é:
+
+    {dialogue}
+
+    Descreva a situação visível em UMA única frase concisa.
+
+    Concentre-se em:
+    - personagem principal visível;
+    - expressão facial;
+    - postura corporal ou gesto;
+    - ação física;
+    - direção do olhar;
+    - interação com outros personagens visíveis.
+
+    Use o diálogo apenas como informação de contexto.
+    Não presuma que algo aconteceu apenas porque o diálogo diz
+    que aconteceu.
+
+    Descreva somente aquilo que pode ser confirmado visualmente
+    pelos frames.
+
+    NÃO invente:
+    - nomes de personagens;
+    - ações;
+    - emoções;
+    - objetos;
+    - acontecimentos;
+    - relacionamentos;
+    - locais.
+
+    Não descreva o fundo ou o cenário, a menos que seja relevante
+    para a ação.
+
+    Se houver vários personagens visíveis, descreva a interação
+    observável entre eles.
+
+    Responda exclusivamente em {language}.
+
+    Retorne SOMENTE a descrição visual final.
+    Não mencione o diálogo.
+    Não explique seu raciocínio.
+    Não use tópicos ou listas.
