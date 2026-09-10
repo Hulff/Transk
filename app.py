@@ -26,6 +26,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+from core.ffmpeg_utils import ensure_ffmpeg_in_path
+
+ensure_ffmpeg_in_path()  # precisa rodar antes de importar/usar o WhisperX
+
 from core.extract_audio import extract_audio
 from core.transcribe import transcribe_and_diarize
 from core.speaker_mapping import map_speakers_to_characters
