@@ -17,6 +17,12 @@ from core.speaker_mapping import map_speakers_to_characters
 from core.scene_analysis import (
     group_into_scenes,
     describe_scenes,
+    DEFAULT_QUESTION,
+)
+
+from core.context_analysis import (
+    analyze_full_context,
+    save_analysis,
 )
 from core.merge import merge_timeline
 from core.cache import (
@@ -149,7 +155,8 @@ def _rodar_cena(
         ),
         question=scene_cfg.get(
             "question",
-        ),
+        )
+        or DEFAULT_QUESTION,
         language=scene_cfg.get(
             "language",
             "pt-BR",
@@ -320,6 +327,57 @@ def processar(
         segments,
         scenes,
     )
+
+    # ---------------------------------------------------------
+    # ANÁLISE FINAL DO VÍDEO
+    # ---------------------------------------------------------
+
+    analysis_path = None
+
+    if scenes:
+        if not forcar and has_cache(
+            base_name,
+            "analise",
+        ):
+            typer.echo("Análise final encontrada no cache.")
+
+            analysis = load_cache(
+                base_name,
+                "analise",
+            )
+
+        else:
+            typer.echo("Gerando análise consolidada do vídeo...")
+
+            contexts = [
+                {
+                    "start": scene.get("timestamp"),
+                    "end": scene.get("end"),
+                    "context": scene.get("description", ""),
+                    "dialogue": scene.get("dialogue", ""),
+                }
+                for scene in scenes
+            ]
+
+            analysis = analyze_full_context(
+                contexts=contexts,
+                config=cfg,
+            )
+
+            save_cache(
+                base_name,
+                "analise",
+                analysis,
+            )
+
+        analysis_path = Path(cfg["output"]["output_dir"]) / f"{base_name}_analise.txt"
+
+        save_analysis(
+            analysis=analysis,
+            path=str(analysis_path),
+        )
+
+        typer.echo(f"Análise consolidada exportada: {analysis_path}")
 
     # ---------------------------------------------------------
     # OUTPUT

@@ -5,9 +5,7 @@ whisper:
   compute_type: "float16"
 
 diarization:
-  # Não coloque o token aqui — use o arquivo .env (veja .env.example).
-  # Esse campo só é usado como fallback se a variável de ambiente HF_TOKEN
-  # não estiver definida.
+
   hf_token: ""
   min_speakers: null
   max_speakers: null
@@ -20,8 +18,7 @@ scene_analysis:
   enabled: true
   mode: "cena"
 
-  # Mais frames = maior chance de capturar ações que acontecem
-  # durante a cena.
+
   frames_per_scene: 12
 
   gap_threshold_seconds: 3.0

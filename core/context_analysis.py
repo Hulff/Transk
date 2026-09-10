@@ -196,7 +196,7 @@ def _analyze_scene(
         )
 
     generated_ids_trimmed = [
-        output_ids[len(input_ids) :]
+        output_ids[len(input_ids):]
         for input_ids, output_ids in zip(
             inputs["input_ids"],
             generated_ids,
@@ -290,3 +290,185 @@ def save_context(
             ensure_ascii=False,
             indent=2,
         )
+
+
+def _build_full_analysis_prompt(
+    contexts: list[dict[str, Any]],
+) -> str:
+
+    scenes_text = []
+
+    for index, context in enumerate(contexts, start=1):
+        scenes_text.append(f"""
+CENA {index}
+INÍCIO: {context.get("start")}
+FIM: {context.get("end")}
+
+ANÁLISE:
+{context.get("context", "").strip()}
+""".strip())
+
+    return f"""
+Você está analisando um filme, anime ou episódio completo.
+
+Abaixo estão as análises individuais das cenas já processadas.
+
+Sua tarefa é consolidar essas informações em uma única análise
+cronológica e objetiva do vídeo inteiro.
+
+Use SOMENTE as informações presentes nas análises das cenas.
+
+Não invente acontecimentos.
+Não invente nomes.
+Não atribua intenções psicológicas que não estejam sustentadas.
+Priorize acontecimentos concretos e observáveis.
+
+É importante preservar a sequência dos acontecimentos.
+
+ANÁLISES DAS CENAS:
+
+{"\n\n".join(scenes_text)}
+
+Retorne exatamente neste formato:
+
+CONTEXTO GERAL
+
+<descrição objetiva do contexto geral do vídeo>
+
+PERSONAGENS
+
+- <personagem>: <participação e acontecimentos relevantes>
+
+AMBIENTES
+
+- <ambiente>: <acontecimentos relevantes>
+
+SEQUÊNCIA DOS ACONTECIMENTOS
+
+- <acontecimento em ordem cronológica>
+- <acontecimento em ordem cronológica>
+- <acontecimento em ordem cronológica>
+
+AÇÕES IMPORTANTES
+
+- <ação>
+- <ação>
+
+FALAS IMPORTANTES
+
+- <personagem>: <fala ou resumo>
+- <personagem>: <fala ou resumo>
+
+ESTADOS / EMOÇÕES OBSERVÁVEIS
+
+- <personagem>: <estado ou emoção aparente>
+
+SÍNTESE
+
+<resumo objetivo do vídeo inteiro>
+
+Se alguma seção não possuir informação suficiente, escreva:
+
+Não identificado.
+""".strip()
+
+
+def analyze_full_context(
+    contexts: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> str:
+
+    if not contexts:
+        return "Não foi possível gerar a análise: nenhuma cena foi processada."
+
+    model, processor = _load_model(config)
+
+    try:
+        prompt = _build_full_analysis_prompt(contexts)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ],
+            }
+        ]
+
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        inputs = processor(
+            text=[text],
+            padding=True,
+            return_tensors="pt",
+        )
+
+        inputs = {
+            key: value.to(model.device) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+
+        scene_cfg = config.get("scene_analysis", {})
+
+        with torch.inference_mode():
+
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=scene_cfg.get(
+                    "context_max_new_tokens",
+                    1000,
+                ),
+                repetition_penalty=scene_cfg.get(
+                    "repetition_penalty",
+                    1.15,
+                ),
+                no_repeat_ngram_size=scene_cfg.get(
+                    "no_repeat_ngram_size",
+                    3,
+                ),
+                do_sample=False,
+            )
+
+        generated_ids_trimmed = [
+            output_ids[len(input_ids) :]
+            for input_ids, output_ids in zip(
+                inputs["input_ids"],
+                generated_ids,
+            )
+        ]
+
+        result = processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+
+        return _clean_result(result)
+
+    finally:
+        del model
+        del processor
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def save_analysis(
+    analysis: str,
+    path: str,
+) -> None:
+
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        file.write(analysis.strip() + "\n")
