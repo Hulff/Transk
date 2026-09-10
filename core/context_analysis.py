@@ -299,77 +299,130 @@ def _build_full_analysis_prompt(
     scenes_text = []
 
     for index, context in enumerate(contexts, start=1):
-        scenes_text.append(f"""
-CENA {index}
-INÍCIO: {context.get("start")}
-FIM: {context.get("end")}
 
-ANÁLISE:
-{context.get("context", "").strip()}
+        dialogue = context.get(
+            "dialogue",
+            "",
+        ).strip()
+
+        visual = context.get(
+            "context",
+            "",
+        ).strip()
+
+        scenes_text.append(f"""
+SCENE {index}
+START: {context.get("start")}
+END: {context.get("end")}
+
+DIALOGUE:
+{dialogue}
+
+SCENE ANALYSIS:
+{visual}
 """.strip())
 
     return f"""
-Você está analisando um filme, anime ou episódio completo.
+You are analyzing a complete movie, anime episode, TV episode, or other
+long-form video.
 
-Abaixo estão as análises individuais das cenas já processadas.
+Below are the individual analyses of the scenes that were already processed.
 
-Sua tarefa é consolidar essas informações em uma única análise
-cronológica e objetiva do vídeo inteiro.
+Your task is to consolidate these scene analyses into one objective,
+chronological audiovisual analysis of the entire video.
 
-Use SOMENTE as informações presentes nas análises das cenas.
+Use ONLY information supported by the provided scene analyses and dialogue.
 
-Não invente acontecimentos.
-Não invente nomes.
-Não atribua intenções psicológicas que não estejam sustentadas.
-Priorize acontecimentos concretos e observáveis.
+The goal is to describe what happens throughout the video, not to invent
+a deeper interpretation of the story.
 
-É importante preservar a sequência dos acontecimentos.
+Prioritize:
 
-ANÁLISES DAS CENAS:
+- the main characters and their participation;
+- relevant locations and environments;
+- important physical actions;
+- interactions between characters;
+- interactions with objects;
+- important events;
+- changes in the situation;
+- attacks, fights, falls, explosions, destruction, entrances, exits,
+  movements, and other concrete events;
+- important dialogue;
+- observable or explicitly supported emotional states;
+- the chronological sequence of events.
+
+Preserve the order in which events occur.
+
+Do NOT invent events.
+
+Do NOT invent character names.
+
+Do NOT invent dialogue.
+
+Do NOT attribute motivations, intentions, symbolism, themes, or psychological
+states unless they are explicitly supported by the provided information.
+
+Prefer concrete descriptions.
+
+For example:
+
+"Cell steps on Android 17's head."
+
+is preferable to:
+
+"Cell steps on Android 17's head to demonstrate his superiority."
+
+Only report the second interpretation if it is explicitly supported.
+
+Do not merge unrelated events simply because they involve the same character.
+
+Do not repeat the same event unnecessarily.
+
+SCENE ANALYSES:
 
 {"\n\n".join(scenes_text)}
 
-Retorne exatamente neste formato:
+Return the final analysis exactly in this structure:
 
-CONTEXTO GERAL
+GENERAL CONTEXT
 
-<descrição objetiva do contexto geral do vídeo>
+<brief objective description of the overall situation>
 
-PERSONAGENS
+CHARACTERS
 
-- <personagem>: <participação e acontecimentos relevantes>
+- <character>: <role, participation, and relevant actions>
 
-AMBIENTES
+ENVIRONMENTS
 
-- <ambiente>: <acontecimentos relevantes>
+- <location/environment>: <relevant events or changes>
 
-SEQUÊNCIA DOS ACONTECIMENTOS
+SEQUENCE OF EVENTS
 
-- <acontecimento em ordem cronológica>
-- <acontecimento em ordem cronológica>
-- <acontecimento em ordem cronológica>
+- <event in chronological order>
+- <event in chronological order>
+- <event in chronological order>
 
-AÇÕES IMPORTANTES
+IMPORTANT ACTIONS
 
-- <ação>
-- <ação>
+- <important physical action>
+- <important physical action>
 
-FALAS IMPORTANTES
+IMPORTANT DIALOGUE
 
-- <personagem>: <fala ou resumo>
-- <personagem>: <fala ou resumo>
+- <character>: <important line or concise summary>
+- <character>: <important line or concise summary>
 
-ESTADOS / EMOÇÕES OBSERVÁVEIS
+OBSERVABLE STATES / EMOTIONS
 
-- <personagem>: <estado ou emoção aparente>
+- <character>: <observable or clearly supported state>
 
-SÍNTESE
+SUMMARY
 
-<resumo objetivo do vídeo inteiro>
+<objective summary of the entire video>
 
-Se alguma seção não possuir informação suficiente, escreva:
+If a section does not contain enough information, write:
 
-Não identificado.
+Not identified.
 """.strip()
 
 

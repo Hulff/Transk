@@ -28,7 +28,7 @@ scene_analysis:
 
   model: "Qwen/Qwen2.5-VL-7B-Instruct"
 
-  language: "pt-BR"
+  language: "en-US"
 
   max_new_tokens: 400
 
@@ -36,7 +36,6 @@ scene_analysis:
   no_repeat_ngram_size: 3
   do_sample: false
 
-  # Deixe vazio para usar o prompt padrão do scene_analysis.py.
   question: ""
 output:
   formats: ["txt", "json", "srt"]

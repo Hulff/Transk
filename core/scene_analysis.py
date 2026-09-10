@@ -98,110 +98,113 @@ def _extract_frame_at(
 
 
 DEFAULT_QUESTION = """
-Analise cuidadosamente todos os frames desta cena em conjunto.
+You are analyzing a scene from a movie, anime, TV episode, or other video.
 
-O diálogo transcrito é:
+Your task is to produce an objective audiovisual description of the entire
+scene by combining the transcribed dialogue with what can be visually observed
+across all provided frames.
 
-{dialogue}
+The frames represent different moments of the same scene. Do NOT describe
+each frame as an isolated image. Instead, identify actions, interactions,
+events, movements, and relevant changes that occur throughout the scene.
 
-Sua tarefa é produzir uma descrição audiovisual objetiva do que
-acontece nesta parte do vídeo.
+The dialogue is contextual information. Do not treat dialogue alone as proof
+that a physical event happened.
 
-REGISTRE PRINCIPALMENTE:
+Describe ONLY information supported by the dialogue or visible in the frames.
 
-- quem aparece;
-- onde a cena acontece, se for relevante;
-- ações físicas realizadas pelos personagens;
-- interações entre personagens;
-- objetos que são segurados, usados, retirados, colocados ou destruídos;
-- movimentos importantes;
-- ataques, quedas, golpes, explosões ou outros acontecimentos;
-- entradas e saídas de personagens;
-- mudanças importantes na situação;
-- expressões faciais e estados aparentes;
-- acontecimentos visuais importantes mesmo quando não há diálogo.
+Prioritize concrete and observable events, including:
 
-Exemplos de acontecimentos que devem ser descritos quando observados:
+- characters who appear in the scene;
+- relevant environment or location;
+- physical actions performed by characters;
+- interactions between characters;
+- interactions with objects;
+- important objects;
+- movements and changes during the scene;
+- attacks, fights, falls, explosions, destruction, or other physical events;
+- characters entering or leaving a location;
+- characters looking at, approaching, touching, carrying, or using something;
+- events that happen without dialogue;
+- facial expressions or apparent emotional states when visually observable
+  or clearly supported by the dialogue.
 
-"o personagem pega uma espada"
+Examples of concrete events:
 
-"o personagem abre a porta"
+- a character picks up a sword;
+- a character opens a door;
+- a character starts running;
+- a character falls;
+- one character attacks another;
+- one character steps on another character;
+- a character looks at another character;
+- a character enters or leaves a room;
+- an explosion occurs;
+- an object is destroyed;
+- a character picks up an object and carries it away.
 
-"o personagem derruba o outro no chão"
+Do NOT primarily interpret themes, symbolism, hidden motivations, or
+psychological intentions.
 
-"o personagem pisa sobre a cabeça do Android"
+For example, prefer:
 
-"um personagem começa a correr"
+"Cell steps on Android 17's head."
 
-"uma explosão destrói parte do cenário"
+instead of:
 
-"o personagem entra na sala"
+"Cell steps on Android 17's head to demonstrate his superiority."
 
-"o personagem olha para outro personagem"
+Only describe the first statement unless the second is explicitly supported
+by the video or dialogue.
 
-NÃO descreva apenas uma imagem estática.
+Do not invent events.
 
-Observe a sequência dos frames e tente identificar ações que acontecem
-ao longo da cena.
+Do not invent character names.
 
-Não invente acontecimentos.
+If a character's identity is unknown, describe the character using a neutral
+label such as "the man", "the woman", "the soldier", "the child", or
+"the character".
 
-O diálogo serve apenas como contexto.
-Não diga que uma ação aconteceu apenas porque alguém falou sobre ela.
+Do not infer events that cannot be supported by the video or dialogue.
 
-Se uma ação não puder ser confirmada visualmente, não a apresente como
-um fato.
+Do not repeat information unnecessarily.
 
-Não invente nomes de personagens.
-Quando o nome estiver disponível no diálogo, ele pode ser usado para
-identificar um personagem visualmente correspondente.
+Return the result exactly in the following structure:
 
-Não invente locais, objetos, relações ou acontecimentos.
+CONTEXT
 
-Evite interpretações narrativas exageradas.
+<brief description of the situation>
 
-Em vez de:
+CHARACTERS
 
-"Cell tenta demonstrar sua superioridade porque odeia Android 17."
+- <character>: <relevant action or observable state>
 
-prefira:
+ENVIRONMENT
 
-"Cell permanece sobre Android 17 e pisa sobre sua cabeça enquanto fala."
+<relevant description of the environment or location>
 
-Descreva acontecimentos concretos.
+EVENTS
 
-Retorne somente o texto final da descrição.
+- <important event>
+- <important event>
 
-Escreva em {language}.
+ACTIONS
 
-Formato:
+- <physical action>
+- <physical action>
 
-CONTEXTO
-<descrição geral e objetiva da situação>
+IMPORTANT DIALOGUE
 
-PERSONAGENS
-- <personagem>: <estado ou ação relevante>
+- <character>: <important line or concise summary of the dialogue>
 
-AMBIENTE
-<ambiente relevante para compreender a cena>
+OBSERVABLE STATES / EMOTIONS
 
-ACONTECIMENTOS
-- <acontecimento visual>
-- <acontecimento visual>
+- <character>: <observable or clearly supported emotional state>
 
-AÇÕES
-- <ação realizada>
-- <ação realizada>
+If a section does not contain enough information, write:
 
-FALAS IMPORTANTES
-- <personagem>: <fala ou resumo>
-
-ESTADO / EMOÇÕES OBSERVÁVEIS
-- <personagem>: <estado aparente>
-
-Não identificado.
+Not identified.
 """.strip()
-
 
 def _load_qwen_model(
     model_name: str,
