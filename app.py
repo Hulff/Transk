@@ -19,24 +19,43 @@ Comandos disponíveis:
     # Processar tudo, mas sem cena mesmo que esteja habilitada no config
     python app.py processar caminho/do/episodio.mp4 --sem-cena
 """
+
 import typer
 import yaml
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 from core.extract_audio import extract_audio
 from core.transcribe import transcribe_and_diarize
 from core.speaker_mapping import map_speakers_to_characters
-from core.scene_analysis import extract_frames, describe_frames, describe_dialogue_scenes, DEFAULT_QUESTION
+from core.scene_analysis import describe_dialogue_scenes, DEFAULT_QUESTION
 from core.merge import merge_timeline
 from core.cache import save_cache, load_cache, has_cache
 from output.formatter import save_outputs
+
+load_dotenv()  # lê o arquivo .env (se existir) e popula os.environ
 
 app = typer.Typer(help="Transcritor de episódios: falas por personagem + ações de cena")
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+
+    # Token do Hugging Face: prioriza a variável de ambiente HF_TOKEN (via .env),
+    # com fallback pro valor em config.yaml (que deve ficar vazio no repo).
+    env_token = os.getenv("HF_TOKEN")
+    if env_token:
+        cfg["diarization"]["hf_token"] = env_token
+    elif not cfg["diarization"].get("hf_token"):
+        raise RuntimeError(
+            "Token do Hugging Face não encontrado. Crie um arquivo .env "
+            "(copie de .env.example) com HF_TOKEN=seu_token, ou preencha "
+            "diarization.hf_token no config.yaml."
+        )
+
+    return cfg
 
 
 def _rodar_audio(video_path: str, cfg: dict, base_name: str) -> list[dict]:
@@ -69,61 +88,44 @@ def _rodar_audio(video_path: str, cfg: dict, base_name: str) -> list[dict]:
     return segments
 
 
-def _rodar_cena(video_path: str, cfg: dict, base_name: str, segments: list[dict] = None) -> list[dict]:
+def _rodar_cena(
+    video_path: str, cfg: dict, base_name: str, segments: list[dict] = None
+) -> list[dict]:
     """
-    Extrai e descreve cenas. No modo "fala", precisa das falas já
+    Extrai e descreve cenas usando o Qwen2.5-VL. Precisa das falas já
     processadas (passadas em `segments` ou carregadas do cache).
     """
     modo = cfg["scene_analysis"].get("mode", "fala")
-    model_name = cfg["scene_analysis"].get("model", "Salesforce/blip2-opt-2.7b")
+    sa = cfg["scene_analysis"]
 
-    if modo == "fala":
-        if segments is None:
-            segments = load_cache(base_name, "falas")
-        if not segments:
-            raise RuntimeError(
-                "O modo 'fala' precisa das falas já processadas. "
-                "Rode 'python app.py audio <video>' primeiro."
-            )
-        typer.echo(f"Analisando cena ancorada em {len(segments)} falas...")
-        scenes = describe_dialogue_scenes(
-            segments=segments,
-            video_path=video_path,
-            model_name=cfg["scene_analysis"]["model"],
-            frames_per_fala=cfg["scene_analysis"]["frames_per_fala"],
-            padding_seconds=cfg["scene_analysis"]["padding_seconds"],
-            question=cfg["scene_analysis"]["question"],
-            language=cfg["scene_analysis"].get(
-                "language",
-                "pt-BR",
-            ),
-            max_new_tokens=cfg["scene_analysis"].get(
-                "max_new_tokens",
-                80,
-            ),
-            repetition_penalty=cfg["scene_analysis"].get(
-                "repetition_penalty",
-                1.15,
-            ),
-            no_repeat_ngram_size=cfg["scene_analysis"].get(
-                "no_repeat_ngram_size",
-                3,
-            ),
-            do_sample=cfg["scene_analysis"].get(
-                "do_sample",
-                False,
-            ),
+    if modo != "fala":
+        raise RuntimeError(
+            "Só o modo 'mode: \"fala\"' é suportado com o Qwen2.5-VL no momento."
         )
 
-    else:
-        typer.echo("Extraindo frames do vídeo (intervalo fixo)...")
-        frames = extract_frames(
-            video_path,
-            output_dir="temp/frames",
-            interval_seconds=cfg["scene_analysis"]["frame_interval_seconds"],
+    if segments is None:
+        segments = load_cache(base_name, "falas")
+    if not segments:
+        raise RuntimeError(
+            "O modo 'fala' precisa das falas já processadas. "
+            "Rode 'python app.py audio <video>' primeiro."
         )
-        typer.echo("Descrevendo cenas (pode demorar bastante em CPU)...")
-        scenes = describe_frames(frames, model_name=model_name)
+
+    typer.echo(f"Analisando cena ancorada em {len(segments)} falas...")
+    scenes = describe_dialogue_scenes(
+        segments,
+        video_path,
+        model_name=sa.get("model", "Qwen/Qwen2.5-VL-7B-Instruct"),
+        frames_per_fala=sa.get("frames_per_fala", 5),
+        padding_seconds=sa.get("padding_seconds", 0.5),
+        question=sa.get("question") or DEFAULT_QUESTION,
+        language=sa.get("language", "pt-BR"),
+        max_new_tokens=sa.get("max_new_tokens", 80),
+        repetition_penalty=sa.get("repetition_penalty", 1.15),
+        no_repeat_ngram_size=sa.get("no_repeat_ngram_size", 3),
+        do_sample=sa.get("do_sample", False),
+        load_in_4bit=sa.get("load_in_4bit", False),
+    )
 
     save_cache(base_name, "cenas", scenes)
     return scenes
@@ -132,7 +134,9 @@ def _rodar_cena(video_path: str, cfg: dict, base_name: str, segments: list[dict]
 @app.command()
 def audio(
     video_path: str = typer.Argument(..., help="Caminho do arquivo de vídeo"),
-    config_path: str = typer.Option("config.yaml", help="Caminho do arquivo de configuração"),
+    config_path: str = typer.Option(
+        "config.yaml", help="Caminho do arquivo de configuração"
+    ),
 ):
     """Roda só a análise de áudio (falas por personagem) e salva em cache."""
     cfg = load_config(config_path)
@@ -147,7 +151,9 @@ def audio(
 @app.command()
 def cena(
     video_path: str = typer.Argument(..., help="Caminho do arquivo de vídeo"),
-    config_path: str = typer.Option("config.yaml", help="Caminho do arquivo de configuração"),
+    config_path: str = typer.Option(
+        "config.yaml", help="Caminho do arquivo de configuração"
+    ),
 ):
     """
     Roda só a análise de cena/ações e salva em cache. No modo "fala"
@@ -165,9 +171,17 @@ def cena(
 @app.command()
 def processar(
     video_path: str = typer.Argument(..., help="Caminho do arquivo de vídeo"),
-    config_path: str = typer.Option("config.yaml", help="Caminho do arquivo de configuração"),
-    sem_cena: bool = typer.Option(False, "--sem-cena", help="Pula a análise de ações/cena mesmo se habilitada no config"),
-    forcar: bool = typer.Option(False, "--forcar", help="Ignora qualquer cache existente e recomputa tudo"),
+    config_path: str = typer.Option(
+        "config.yaml", help="Caminho do arquivo de configuração"
+    ),
+    sem_cena: bool = typer.Option(
+        False,
+        "--sem-cena",
+        help="Pula a análise de ações/cena mesmo se habilitada no config",
+    ),
+    forcar: bool = typer.Option(
+        False, "--forcar", help="Ignora qualquer cache existente e recomputa tudo"
+    ),
 ):
     """
     Roda o pipeline completo (áudio + cena, se habilitada) e gera o

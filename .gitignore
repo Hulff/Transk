@@ -1,5 +1,15 @@
+# Segredos
 .env
-output/
-None/
+
+# Ambiente virtual
+venv/
+__pycache__/
+*.pyc
+
+# Arquivos temporários e resultados gerados
+temp/
 resultados/
-vscode/
+
+# Amostras de voz (podem ser pesadas / pessoais)
+models/voice_profiles/*
+!models/voice_profiles/.gitkeep

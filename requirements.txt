@@ -1,10 +1,16 @@
 whisperx
 pyannote.audio
+speechbrain
 torch
 torchaudio
+torchvision
 pyyaml
 numpy
 streamlit
 typer
-speechbrain
+transformers>=4.49.0
 accelerate
+qwen-vl-utils
+bitsandbytes
+python-dotenv
+imageio-ffmpeg
