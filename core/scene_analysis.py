@@ -263,3 +263,126 @@ def describe_dialogue_scenes(
         )
 
     return scenes
+
+
+# ---------------------------------------------------------------------
+# Modo "cena" — agrupa falas consecutivas e analisa tudo de uma vez
+# ---------------------------------------------------------------------
+
+
+def group_into_scenes(
+    segments: list[dict], gap_threshold_seconds: float = 3.0
+) -> list[dict]:
+    """
+    Agrupa falas consecutivas em cenas. Uma nova cena começa sempre que
+    o intervalo de silêncio entre o fim de uma fala e o início da
+    próxima ultrapassa `gap_threshold_seconds`.
+
+    Retorna lista de {"start", "end", "segments": [...]}.
+    """
+    if not segments:
+        return []
+
+    scenes = []
+    current = [segments[0]]
+
+    for seg in segments[1:]:
+        gap = seg["start"] - current[-1]["end"]
+        if gap > gap_threshold_seconds:
+            scenes.append(current)
+            current = [seg]
+        else:
+            current.append(seg)
+    scenes.append(current)
+
+    return [
+        {"start": group[0]["start"], "end": group[-1]["end"], "segments": group}
+        for group in scenes
+    ]
+
+
+def describe_scenes(
+    scenes: list[dict],
+    video_path: str,
+    model_name: str = "Qwen/Qwen2.5-VL-7B-Instruct",
+    frames_per_scene: int = 8,
+    padding_seconds: float = 0.5,
+    output_dir: str = "temp/frames_cenas",
+    question: str = DEFAULT_QUESTION,
+    language: str = "pt-BR",
+    max_new_tokens: int = 120,
+    repetition_penalty: float = 1.15,
+    no_repeat_ngram_size: int = 3,
+    do_sample: bool = False,
+    load_in_4bit: bool = False,
+) -> list[dict]:
+    """
+    Para cada cena (grupo de falas agrupadas por group_into_scenes),
+    extrai `frames_per_scene` frames espalhados pela duração INTEIRA da
+    cena e pede pro Qwen2.5-VL descrever a cena combinando TODOS esses
+    frames + TODAS as falas da cena (diálogo completo) no mesmo prompt.
+
+    Retorna lista de {"timestamp": start_da_cena, "description": texto},
+    compatível com merge_timeline (mesmo formato usado pelo modo "fala").
+    """
+    model, processor = _load_qwen_model(model_name, load_in_4bit=load_in_4bit)
+    print(f"[scene_analysis] Modelo carregado. Analisando {len(scenes)} cenas...")
+
+    results = []
+    for idx, scene in enumerate(scenes):
+        start, end = scene["start"], scene["end"]
+        duration = max(end - start, 0.1)
+
+        if frames_per_scene == 1:
+            timestamps = [start + duration / 2]
+        else:
+            timestamps = [
+                start
+                - padding_seconds
+                + (duration + 2 * padding_seconds) * i / (frames_per_scene - 1)
+                for i in range(frames_per_scene)
+            ]
+        timestamps = [max(t, 0) for t in timestamps]
+
+        frame_paths = []
+        for i, t in enumerate(timestamps):
+            frame_path = str(Path(output_dir) / f"cena{idx:04d}_{i}.jpg")
+            try:
+                _extract_frame_at(video_path, t, frame_path)
+                frame_paths.append(frame_path)
+            except RuntimeError as e:
+                print(f"[scene_analysis]   erro ao extrair frame em {t:.1f}s: {e}")
+                continue
+
+        # diálogo completo da cena, todas as falas na ordem
+        dialogue = "\n".join(
+            f"{seg.get('speaker', '?').upper()}: {seg['text']}"
+            for seg in scene["segments"]
+        )
+
+        description = ""
+        if frame_paths:
+            try:
+                description = _describe_scene(
+                    model,
+                    processor,
+                    frame_paths,
+                    dialogue,
+                    question,
+                    language=language,
+                    max_new_tokens=max_new_tokens,
+                    repetition_penalty=repetition_penalty,
+                    no_repeat_ngram_size=no_repeat_ngram_size,
+                    do_sample=do_sample,
+                )
+            except Exception as e:
+                print(f"[scene_analysis]   erro ao gerar descrição: {e}")
+
+        results.append({"timestamp": start, "description": description})
+        print(
+            f"[scene_analysis] Cena {idx+1}/{len(scenes)} "
+            f"({start:.1f}s-{end:.1f}s, {len(scene['segments'])} falas, {len(frame_paths)} frames): "
+            f"{description or '(sem descrição)'}"
+        )
+
+    return results

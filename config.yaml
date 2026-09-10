@@ -18,8 +18,15 @@ speaker_mapping:
 
 scene_analysis:
   enabled: true
-  mode: "fala"
+  mode: "cena"    # "cena" (agrupa falas + frames da cena inteira) ou "fala" (ancorado por linha de diálogo)
+
+  # usado no modo "fala"
   frames_per_fala: 5
+
+  # usado no modo "cena"
+  frames_per_scene: 8              # quantos frames espalhar pela cena inteira
+  gap_threshold_seconds: 3.0       # silêncio acima disso = começa uma cena nova
+
   padding_seconds: 0.5
   load_in_4bit: false   # true se a GPU tiver menos de ~16GB de VRAM (ex: T4 do Colab free)
 
@@ -30,7 +37,7 @@ scene_analysis:
   language: "en-US"
 
   # Parâmetros de geração
-  max_new_tokens: 80
+  max_new_tokens: 150   # cenas têm mais contexto (várias falas) — vale mais espaço que no modo "fala"
   repetition_penalty: 1.15
   no_repeat_ngram_size: 3
   do_sample: false

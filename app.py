@@ -33,7 +33,12 @@ ensure_ffmpeg_in_path()  # precisa rodar antes de importar/usar o WhisperX
 from core.extract_audio import extract_audio
 from core.transcribe import transcribe_and_diarize
 from core.speaker_mapping import map_speakers_to_characters
-from core.scene_analysis import describe_dialogue_scenes, DEFAULT_QUESTION
+from core.scene_analysis import (
+    describe_dialogue_scenes,
+    group_into_scenes,
+    describe_scenes,
+    DEFAULT_QUESTION,
+)
 from core.merge import merge_timeline
 from core.cache import save_cache, load_cache, has_cache
 from output.formatter import save_outputs
@@ -102,25 +107,21 @@ def _rodar_cena(
     modo = cfg["scene_analysis"].get("mode", "fala")
     sa = cfg["scene_analysis"]
 
-    if modo != "fala":
+    if modo not in ("fala", "cena"):
         raise RuntimeError(
-            "Só o modo 'mode: \"fala\"' é suportado com o Qwen2.5-VL no momento."
+            "Só os modos 'fala' e 'cena' são suportados com o Qwen2.5-VL no momento."
         )
 
     if segments is None:
         segments = load_cache(base_name, "falas")
     if not segments:
         raise RuntimeError(
-            "O modo 'fala' precisa das falas já processadas. "
+            f"O modo '{modo}' precisa das falas já processadas. "
             "Rode 'python app.py audio <video>' primeiro."
         )
 
-    typer.echo(f"Analisando cena ancorada em {len(segments)} falas...")
-    scenes = describe_dialogue_scenes(
-        segments,
-        video_path,
+    common_kwargs = dict(
         model_name=sa.get("model", "Qwen/Qwen2.5-VL-7B-Instruct"),
-        frames_per_fala=sa.get("frames_per_fala", 5),
         padding_seconds=sa.get("padding_seconds", 0.5),
         question=sa.get("question") or DEFAULT_QUESTION,
         language=sa.get("language", "pt-BR"),
@@ -130,6 +131,29 @@ def _rodar_cena(
         do_sample=sa.get("do_sample", False),
         load_in_4bit=sa.get("load_in_4bit", False),
     )
+
+    if modo == "fala":
+        typer.echo(f"Analisando cena ancorada em {len(segments)} falas...")
+        scenes = describe_dialogue_scenes(
+            segments,
+            video_path,
+            frames_per_fala=sa.get("frames_per_fala", 5),
+            **common_kwargs,
+        )
+    else:  # modo == "cena"
+        gap = sa.get("gap_threshold_seconds", 3.0)
+        grouped = group_into_scenes(segments, gap_threshold_seconds=gap)
+        typer.echo(
+            f"{len(segments)} falas agrupadas em {len(grouped)} cenas (gap > {gap}s = nova cena)..."
+        )
+        common_kwargs.pop("padding_seconds", None)
+        scenes = describe_scenes(
+            grouped,
+            video_path,
+            frames_per_scene=sa.get("frames_per_scene", 8),
+            padding_seconds=sa.get("padding_seconds", 0.5),
+            **common_kwargs,
+        )
 
     save_cache(base_name, "cenas", scenes)
     return scenes
