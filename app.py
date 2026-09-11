@@ -31,6 +31,15 @@ from core.cache import (
     load_cache,
     has_cache,
 )
+from core.dataset_builder import (
+    list_scenes,
+    add_example,
+    save_run_to_dataset,
+    list_pending_review,
+    update_correction,
+    export_fewshot_snippet,
+    export_finetune_jsonl,
+)
 from output.formatter import save_outputs
 
 load_dotenv()
@@ -258,6 +267,11 @@ def processar(
         False,
         "--forcar",
     ),
+    save: bool = typer.Option(
+        False,
+        "--save",
+        help="Ao final, grava todas as cenas processadas no dataset (dataset/dataset.jsonl), pendentes de revisão manual.",
+    ),
 ):
 
     cfg = load_config(config_path)
@@ -420,6 +434,147 @@ def processar(
     for formato, caminho in caminhos.items():
 
         typer.echo(f"  - {formato}: {caminho}")
+
+    # ---------------------------------------------------------
+    # DATASET (--save)
+    # ---------------------------------------------------------
+
+    if save:
+
+        if not scenes:
+            typer.echo("\n--save ignorado: não há cenas processadas nesta execução.")
+        else:
+            added_ids = save_run_to_dataset(base_name, scenes)
+
+            if added_ids:
+                typer.echo(
+                    f"\n{len(added_ids)} cena(s) gravada(s) no dataset (pendentes de revisão):"
+                )
+                for example_id in added_ids:
+                    typer.echo(f"  - {example_id}")
+                typer.echo("Revise com: python app.py dataset-revisar")
+            else:
+                typer.echo(
+                    "\n--save: todas as cenas já estavam no dataset, nada novo gravado."
+                )
+
+
+@app.command("dataset-listar")
+def dataset_listar(
+    video_path: str = typer.Argument(
+        ..., help="Caminho do vídeo (mesmo usado antes, só pra achar o cache)"
+    ),
+):
+    """Lista as cenas já processadas (cache) com índice, diálogo e a descrição que o modelo gerou."""
+    base_name = Path(video_path).stem
+    scenes = list_scenes(base_name)
+
+    for i, scene in enumerate(scenes):
+        typer.echo(
+            f"\n--- Cena {i} ({scene.get('timestamp'):.1f}s - {scene.get('end'):.1f}s) ---"
+        )
+        typer.echo(f"Diálogo:\n{scene.get('dialogue', '')}")
+        typer.echo(f"\nModelo gerou:\n{scene.get('description', '')}")
+
+
+@app.command("dataset-adicionar")
+def dataset_adicionar(
+    video_path: str = typer.Argument(..., help="Caminho do vídeo"),
+    indice: int = typer.Argument(..., help="Índice da cena (veja com dataset-listar)"),
+    arquivo_correcao: str = typer.Option(
+        None,
+        "--arquivo",
+        help="Caminho de um .txt com a versão corrigida. Se omitido, abre um editor de texto no terminal.",
+    ),
+):
+    """
+    Adiciona um exemplo ao dataset: mostra o que o modelo gerou pra
+    essa cena e pede a versão corrigida (via editor ou arquivo).
+    """
+    base_name = Path(video_path).stem
+    scenes = list_scenes(base_name)
+
+    if indice < 0 or indice >= len(scenes):
+        typer.echo(f"Índice inválido. Há {len(scenes)} cenas (0 a {len(scenes) - 1}).")
+        raise typer.Exit(1)
+
+    scene = scenes[indice]
+
+    typer.echo(f"Diálogo:\n{scene.get('dialogue', '')}\n")
+    typer.echo(f"Modelo gerou:\n{scene.get('description', '')}\n")
+
+    if arquivo_correcao:
+        corrected = Path(arquivo_correcao).read_text(encoding="utf-8")
+    else:
+        corrected = typer.edit(scene.get("description", "")) or ""
+
+    if not corrected.strip():
+        typer.echo("Correção vazia, nada foi salvo.")
+        raise typer.Exit(1)
+
+    example_id = add_example(base_name, indice, corrected)
+    typer.echo(f"\nExemplo salvo: {example_id}")
+
+
+@app.command("dataset-revisar")
+def dataset_revisar():
+    """
+    Percorre os exemplos gravados automaticamente (via --save) que
+    ainda não têm correção humana, mostrando o que o modelo gerou e
+    pedindo a versão corrigida (abre o editor de texto do terminal).
+    """
+    pendentes = list_pending_review()
+
+    if not pendentes:
+        typer.echo("Nenhum exemplo pendente de revisão.")
+        raise typer.Exit()
+
+    typer.echo(f"{len(pendentes)} exemplo(s) pendente(s).\n")
+
+    for ex in pendentes:
+        typer.echo(f"--- {ex['id']} ---")
+        typer.echo(f"Diálogo:\n{ex.get('dialogue', '')}\n")
+        typer.echo(f"Modelo gerou:\n{ex.get('model_output', '')}\n")
+
+        corrected = typer.edit(ex.get("model_output", "") or "")
+
+        if corrected is None:
+            typer.echo("Pulado (nada foi salvo pra este exemplo).\n")
+            continue
+
+        if not corrected.strip():
+            typer.echo("Correção vazia, pulado.\n")
+            continue
+
+        update_correction(ex["id"], corrected)
+        typer.echo(f"Salvo: {ex['id']}\n")
+
+
+@app.command("dataset-exportar")
+def dataset_exportar(
+    formato: str = typer.Option(
+        "fewshot",
+        help="'fewshot' (trecho pra colar no prompt) ou 'finetune' (jsonl pra treino)",
+    ),
+    n: int = typer.Option(
+        3, help="Quantos exemplos incluir (só usado no formato fewshot)"
+    ),
+):
+    """Exporta o dataset acumulado no formato pedido."""
+    if formato == "fewshot":
+        snippet = export_fewshot_snippet(n=n)
+        if not snippet:
+            typer.echo(
+                "Dataset vazio — adicione exemplos com 'dataset-adicionar' primeiro."
+            )
+            raise typer.Exit(1)
+        typer.echo(snippet)
+    elif formato == "finetune":
+        path = export_finetune_jsonl()
+        typer.echo(f"Exportado para: {path}")
+    else:
+        typer.echo("Formato inválido. Use 'fewshot' ou 'finetune'.")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

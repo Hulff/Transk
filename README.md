@@ -116,6 +116,10 @@ python app.py processar caminho/do/episodio.mp4 --forcar
 # Processar tudo, mas pular a análise de cena (e portanto a síntese
 # e validação, que dependem dela) mesmo se estiver habilitada no config
 python app.py processar caminho/do/episodio.mp4 --sem-cena
+
+# Além de gerar a saída normal, grava todas as cenas processadas no
+# dataset de exemplos (veja seção "Dataset de exemplos" abaixo)
+python app.py processar caminho/do/episodio.mp4 --save
 ```
 
 Os arquivos de saída vão para a pasta `resultados/`:
@@ -199,6 +203,70 @@ mas errados (`Vegata`, `Veggies`, `Goham's`) ou números inventados
 A etapa de validação reforça essa checagem numa segunda passada,
 comparando a síntese final contra as análises de cena originais.
 
+## Dataset de exemplos (few-shot e fine-tuning futuro)
+
+O app inclui uma ferramenta pra ir acumulando exemplos corrigidos
+manualmente, sem precisar de nenhum treino pra já tirar proveito deles
+(few-shot), e formando aos poucos uma base que serviria pra fine-tuning
+de verdade caso o volume cresça bastante no futuro.
+
+### Gravando exemplos automaticamente
+
+```bash
+python app.py processar caminho/do/episodio.mp4 --save
+```
+
+Isso grava **todas as cenas** daquela execução em `dataset/dataset.jsonl`
+(com os frames copiados pra `dataset/frames/`, já que `temp/` pode ser
+limpo), marcadas como pendentes de revisão (`corrected_output: null`).
+Rodar `--save` de novo no mesmo vídeo não duplica — cenas já gravadas
+são ignoradas.
+
+### Revisando o que ficou pendente
+
+```bash
+python app.py dataset-revisar
+```
+
+Mostra, uma cena por vez, o diálogo e o que o modelo gerou, e abre seu
+editor de texto padrão do terminal pra você escrever a versão corrigida
+(ou fechar sem salvar pra pular aquele exemplo por enquanto).
+
+### Adicionando um exemplo específico manualmente
+
+Alternativa ao `--save` em massa — corrige uma cena só, na hora:
+
+```bash
+# Lista as cenas em cache pra você escolher o índice
+python app.py dataset-listar caminho/do/episodio.mp4
+
+# Abre o editor com a descrição do modelo pra essa cena, pra você corrigir
+python app.py dataset-adicionar caminho/do/episodio.mp4 3
+```
+
+### Usando os exemplos revisados
+
+```bash
+python app.py dataset-exportar --formato fewshot --n 3
+```
+
+Imprime um trecho de texto pronto pra colar no início do prompt
+(`question` no `config.yaml`) — o modelo passa a ver 2-3 exemplos reais
+de "diálogo → descrição correta" antes de analisar a cena atual, o que
+ajuda a acertar formato e estilo sem precisar treinar nada. Só exemplos
+já revisados (com correção humana) entram aqui — os pendentes são
+ignorados.
+
+```bash
+python app.py dataset-exportar --formato finetune
+```
+
+Gera `dataset/finetune.jsonl`, no formato de conversa (imagens + texto
+→ resposta) que ferramentas de fine-tuning de VLM como LLaMA-Factory ou
+ms-swift esperam. Só vale a pena quando o dataset já tiver um volume
+razoável (dezenas a centenas de exemplos revisados) — com poucos
+exemplos, `fewshot` é a opção que realmente compensa.
+
 ## Estrutura do projeto
 
 ```
@@ -211,18 +279,17 @@ transcritor_app/
 │   ├── scene_analysis.py      # agrupamento em cenas + análise visual (Qwen2.5-VL)
 │   ├── context_analysis.py    # síntese narrativa final + validação
 │   ├── merge.py               # junta falas + ações em uma timeline
-│   └── cache.py               # cache em JSON dos resultados intermediários
+│   ├── cache.py               # cache em JSON dos resultados intermediários
+│   └── dataset_builder.py     # dataset de exemplos corrigidos (few-shot / fine-tuning)
 ├── output/
 │   └── formatter.py           # gera .txt, .json, .srt
 ├── models/voice_profiles/     # amostras de voz por personagem
-├── app.py                     # CLI (comandos: audio, cena, processar)
+├── dataset/                   # exemplos corrigidos (dataset.jsonl + frames/)
+├── app.py                     # CLI (comandos: audio, cena, processar, dataset-*)
 ├── interface_streamlit.py     # interface web (fluxo de falas)
 ├── .env.example                # modelo do arquivo de variáveis de ambiente
 └── config.yaml                 # configurações gerais
 ```
-
-## Fluxo detalhado
-
 
 ## Notas importantes
 
@@ -241,3 +308,7 @@ transcritor_app/
   impraticável pras etapas de cena, síntese e validação. O Google
   Colab (gratuito, com T4) é a opção mais acessível pra quem não tem
   uma.
+- **Pasta `dataset/`**: cresce com o tempo e inclui imagens (frames
+  copiados) — considere se vale versionar no Git (é um ativo valioso,
+  mas pode inflar o tamanho do repositório) ou manter só localmente /
+  num storage separado.
