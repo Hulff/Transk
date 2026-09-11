@@ -221,6 +221,9 @@ transcritor_app/
 └── config.yaml                 # configurações gerais
 ```
 
+## Fluxo detalhado
+
+
 ## Notas importantes
 
 - **Precisão da diarização**: vozes parecidas (ex: personagens do
