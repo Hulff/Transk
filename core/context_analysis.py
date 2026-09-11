@@ -188,10 +188,6 @@ def _analyze_scene(
                 "repetition_penalty",
                 1.15,
             ),
-            no_repeat_ngram_size=scene_cfg.get(
-                "no_repeat_ngram_size",
-                3,
-            ),
             do_sample=False,
         )
 
@@ -502,10 +498,6 @@ def analyze_full_context(
                     "repetition_penalty",
                     1.15,
                 ),
-                no_repeat_ngram_size=scene_cfg.get(
-                    "no_repeat_ngram_size",
-                    3,
-                ),
                 do_sample=False,
             )
 
@@ -665,10 +657,6 @@ def validate_analysis(
                 repetition_penalty=scene_cfg.get(
                     "repetition_penalty",
                     1.15,
-                ),
-                no_repeat_ngram_size=scene_cfg.get(
-                    "no_repeat_ngram_size",
-                    3,
                 ),
                 do_sample=False,
             )

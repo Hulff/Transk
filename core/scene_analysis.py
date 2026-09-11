@@ -262,7 +262,7 @@ def _describe_scene(
     language: str,
     max_new_tokens: int,
     repetition_penalty: float,
-    no_repeat_ngram_size: int,
+    no_repeat_ngram_size: int | None,
     do_sample: bool,
 ) -> str:
 
@@ -313,12 +313,22 @@ def _describe_scene(
 
     inputs = inputs.to(model.device)
 
+    generate_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "repetition_penalty": repetition_penalty,
+        "do_sample": do_sample,
+    }
+    # no_repeat_ngram_size bane a sequência de N tokens em TODA a
+    # entrada (prompt + gerado) — com diálogos longos/repetitivos isso
+    # pode banir o próprio nome de um personagem que já apareceu antes
+    # no diálogo, corrompendo a grafia. Só ativa se explicitamente
+    # configurado com um valor.
+    if no_repeat_ngram_size:
+        generate_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
+
     generated_ids = model.generate(
         **inputs,
-        max_new_tokens=max_new_tokens,
-        repetition_penalty=repetition_penalty,
-        no_repeat_ngram_size=no_repeat_ngram_size,
-        do_sample=do_sample,
+        **generate_kwargs,
     )
 
     generated_ids_trimmed = [
@@ -383,7 +393,7 @@ def describe_scenes(
     language: str = "pt-BR",
     max_new_tokens: int = 400,
     repetition_penalty: float = 1.15,
-    no_repeat_ngram_size: int = 3,
+    no_repeat_ngram_size: int | None = None,
     do_sample: bool = False,
     load_in_4bit: bool = False,
 ) -> list[dict]:

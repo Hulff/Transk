@@ -5,9 +5,7 @@ whisper:
   compute_type: "float16"
 
 diarization:
-  # Não coloque o token aqui — use o arquivo .env (veja .env.example).
-  # Esse campo só é usado como fallback se a variável de ambiente HF_TOKEN
-  # não estiver definida.
+
   hf_token: ""
   min_speakers: null
   max_speakers: null
@@ -18,76 +16,35 @@ speaker_mapping:
 
 scene_analysis:
   enabled: true
-  mode: "cena"    # "cena" (agrupa falas + frames da cena inteira) ou "fala" (ancorado por linha de diálogo)
+  mode: "cena"
 
-  # usado no modo "fala"
-  frames_per_fala: 5
 
-  # usado no modo "cena"
-  frames_per_scene: 8              # quantos frames espalhar pela cena inteira
-  gap_threshold_seconds: 3.0       # silêncio acima disso = começa uma cena nova
+  frames_per_scene: 12
 
+  gap_threshold_seconds: 3.0
   padding_seconds: 0.5
-  load_in_4bit: false   # true se a GPU tiver menos de ~16GB de VRAM (ex: T4 do Colab free)
 
-  # Modelo multimodal
+  load_in_4bit: false
+
   model: "Qwen/Qwen2.5-VL-7B-Instruct"
 
-  # Idioma da descrição gerada pelo Qwen
   language: "en-US"
 
-  # Parâmetros de geração
-  max_new_tokens: 150   # cenas têm mais contexto (várias falas) — vale mais espaço que no modo "fala"
+  max_new_tokens: 400
+
+  validation_max_new_tokens: 1200   # etapa de revisão da análise final (documento inteiro, precisa de mais espaço)
+
   repetition_penalty: 1.15
-  no_repeat_ngram_size: 3
+  # no_repeat_ngram_size bane qualquer sequência de N tokens repetida em
+  # TODA a entrada (incluindo o prompt) — em prompts longos e repetitivos
+  # (diálogo com o mesmo nome de personagem várias vezes, blocos de cena
+  # repetidos) isso pode corromper a grafia de nomes e cabeçalhos. Deixe
+  # null (desligado) a menos que veja loops de repetição real no texto
+  # gerado; nesse caso use um valor alto (8+), nunca 2 ou 3.
+  no_repeat_ngram_size: null
   do_sample: false
 
-  question: |
-    Analise os frames do vídeo em conjunto.
-
-    O diálogo falado durante esta cena é:
-
-    {dialogue}
-
-    Descreva a situação visível em UMA única frase concisa.
-
-    Concentre-se em:
-    - personagem principal visível;
-    - expressão facial;
-    - postura corporal ou gesto;
-    - ação física;
-    - direção do olhar;
-    - interação com outros personagens visíveis.
-
-    Use o diálogo apenas como informação de contexto.
-    Não presuma que algo aconteceu apenas porque o diálogo diz
-    que aconteceu.
-
-    Descreva somente aquilo que pode ser confirmado visualmente
-    pelos frames.
-
-    NÃO invente:
-    - nomes de personagens;
-    - ações;
-    - emoções;
-    - objetos;
-    - acontecimentos;
-    - relacionamentos;
-    - locais.
-
-    Não descreva o fundo ou o cenário, a menos que seja relevante
-    para a ação.
-
-    Se houver vários personagens visíveis, descreva a interação
-    observável entre eles.
-
-    Responda exclusivamente em {language}.
-
-    Retorne SOMENTE a descrição visual final.
-    Não mencione o diálogo.
-    Não explique seu raciocínio.
-    Não use tópicos ou listas.
-
+  question: ""
 output:
   formats: ["txt", "json", "srt"]
   output_dir: "resultados"
