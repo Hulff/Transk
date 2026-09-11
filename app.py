@@ -22,6 +22,7 @@ from core.scene_analysis import (
 
 from core.context_analysis import (
     analyze_full_context,
+    validate_analysis,
     save_analysis,
 )
 from core.merge import merge_timeline
@@ -337,17 +338,40 @@ def processar(
     if scenes:
         if not forcar and has_cache(
             base_name,
-            "analise",
+            "analise_validada",
         ):
-            typer.echo("Análise final encontrada no cache.")
+            typer.echo("Análise validada encontrada no cache.")
 
             analysis = load_cache(
                 base_name,
-                "analise",
+                "analise_validada",
             )
 
         else:
-            typer.echo("Gerando análise consolidada do vídeo...")
+            if not forcar and has_cache(base_name, "analise_rascunho"):
+                typer.echo("Rascunho da análise encontrado no cache.")
+                draft = load_cache(base_name, "analise_rascunho")
+            else:
+                typer.echo("Gerando análise consolidada do vídeo...")
+
+                contexts = [
+                    {
+                        "start": scene.get("timestamp"),
+                        "end": scene.get("end"),
+                        "context": scene.get("description", ""),
+                        "dialogue": scene.get("dialogue", ""),
+                    }
+                    for scene in scenes
+                ]
+
+                draft = analyze_full_context(
+                    contexts=contexts,
+                    config=cfg,
+                )
+
+                save_cache(base_name, "analise_rascunho", draft)
+
+            typer.echo("Validando e corrigindo a análise...")
 
             contexts = [
                 {
@@ -359,14 +383,15 @@ def processar(
                 for scene in scenes
             ]
 
-            analysis = analyze_full_context(
+            analysis = validate_analysis(
+                draft_analysis=draft,
                 contexts=contexts,
                 config=cfg,
             )
 
             save_cache(
                 base_name,
-                "analise",
+                "analise_validada",
                 analysis,
             )
 

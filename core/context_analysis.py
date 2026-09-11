@@ -196,7 +196,7 @@ def _analyze_scene(
         )
 
     generated_ids_trimmed = [
-        output_ids[len(input_ids):]
+        output_ids[len(input_ids) :]
         for input_ids, output_ids in zip(
             inputs["input_ids"],
             generated_ids,
@@ -292,7 +292,7 @@ def save_context(
         )
 
 
-def _build_full_analysis_prompt(
+def _format_scenes_text(
     contexts: list[dict[str, Any]],
 ) -> str:
 
@@ -321,6 +321,15 @@ DIALOGUE:
 SCENE ANALYSIS:
 {visual}
 """.strip())
+
+    return "\n\n".join(scenes_text)
+
+
+def _build_full_analysis_prompt(
+    contexts: list[dict[str, Any]],
+) -> str:
+
+    scenes_text = _format_scenes_text(contexts)
 
     return f"""
 You are analyzing a complete movie, anime episode, TV episode, or other
@@ -357,6 +366,17 @@ Do NOT invent events.
 
 Do NOT invent character names.
 
+Only use a character's name if that exact name appears verbatim in the
+DIALOGUE sections of the scene analyses above. Do not use outside
+knowledge of any movie, show, or franchise to identify or correct a
+character's name, even if you recognize who they might be.
+
+If a character is not named in the dialogue, refer to them using a
+neutral, consistent label instead (e.g. "the man", "the character with
+spiky hair", "the taller character"). Use the SAME label for the same
+character across the whole analysis — do not switch labels or spellings
+partway through.
+
 Do NOT invent dialogue.
 
 Do NOT attribute motivations, intentions, symbolism, themes, or psychological
@@ -380,7 +400,7 @@ Do not repeat the same event unnecessarily.
 
 SCENE ANALYSES:
 
-{"\n\n".join(scenes_text)}
+{scenes_text}
 
 Return the final analysis exactly in this structure:
 
@@ -525,3 +545,156 @@ def save_analysis(
     ) as file:
 
         file.write(analysis.strip() + "\n")
+
+
+def _build_validation_prompt(
+    draft_analysis: str,
+    contexts: list[dict[str, Any]],
+) -> str:
+
+    scenes_text = _format_scenes_text(contexts)
+
+    return f"""
+You previously wrote the following consolidated analysis of a video,
+based on individual scene analyses and dialogue.
+
+DRAFT ANALYSIS:
+
+{draft_analysis}
+
+Below are the ORIGINAL scene-by-scene analyses and dialogue that this
+draft was supposed to be based on. Treat this as the only source of
+truth — anything in the draft that isn't supported here is an error.
+
+{scenes_text}
+
+Carefully review the draft against the original scene analyses and
+dialogue above. Check specifically for:
+
+- events, objects, or details in the draft that are NOT supported by
+  the scene analyses or dialogue;
+- character NAME SPELLING errors or inconsistent spelling of the same
+  character across the document (e.g. the same character being called
+  by two different or misspelled names in different sections) — pick
+  ONE correct, consistent spelling for each character and use it
+  throughout the entire document;
+- specific numeric or identifying labels (e.g. "Android 7", "Android
+  8") that do NOT appear verbatim in the scene analyses or dialogue
+  above — if the exact label isn't present in the source, replace it
+  with a neutral description instead of guessing a number;
+- actions or dialogue attributed to the wrong character;
+- events placed in the wrong chronological order;
+- grammar, spelling, punctuation, or phrasing errors — including
+  broken/garbled words (e.g. "terraines", "saiyn", "Goham's");
+- interpretations of motivation, symbolism, or psychological state
+  that go beyond what is explicitly supported;
+- unnecessary repetition of the same event or information.
+
+Correct every issue you find. Do not introduce any new information
+that isn't supported by the scene analyses or dialogue above — when in
+doubt, remove the unsupported claim or use a neutral description
+rather than guessing.
+
+If the draft is already fully accurate, return it unchanged.
+
+Return ONLY the corrected analysis, using EXACTLY the same section
+structure as the draft (same headers, same order, plain text — no
+markdown symbols like ### or **). Do not explain what you changed or
+add any commentary outside the analysis itself.
+""".strip()
+
+
+def validate_analysis(
+    draft_analysis: str,
+    contexts: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> str:
+    """
+    Segunda passada sobre a análise consolidada: confere o rascunho
+    contra as análises de cena originais (a fonte confiável, ancorada
+    em frames + diálogo) e corrige inconsistências — nomes trocados,
+    eventos mal atribuídos, alucinação, erros de escrita.
+    """
+    if not draft_analysis or not contexts:
+        return draft_analysis
+
+    model, processor = _load_model(config)
+
+    try:
+        prompt = _build_validation_prompt(draft_analysis, contexts)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ],
+            }
+        ]
+
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        inputs = processor(
+            text=[text],
+            padding=True,
+            return_tensors="pt",
+        )
+
+        inputs = {
+            key: value.to(model.device) if hasattr(value, "to") else value
+            for key, value in inputs.items()
+        }
+
+        scene_cfg = config.get("scene_analysis", {})
+
+        with torch.inference_mode():
+
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=scene_cfg.get(
+                    "validation_max_new_tokens",
+                    1200,
+                ),
+                repetition_penalty=scene_cfg.get(
+                    "repetition_penalty",
+                    1.15,
+                ),
+                no_repeat_ngram_size=scene_cfg.get(
+                    "no_repeat_ngram_size",
+                    3,
+                ),
+                do_sample=False,
+            )
+
+        generated_ids_trimmed = [
+            output_ids[len(input_ids) :]
+            for input_ids, output_ids in zip(
+                inputs["input_ids"],
+                generated_ids,
+            )
+        ]
+
+        result = processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+
+        revised = _clean_result(result)
+
+        # segurança: se a revisão vier vazia por algum motivo, mantém o rascunho
+        return revised if revised.strip() else draft_analysis
+
+    finally:
+        del model
+        del processor
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

@@ -161,9 +161,17 @@ Do not invent events.
 
 Do not invent character names.
 
-If a character's identity is unknown, describe the character using a neutral
-label such as "the man", "the woman", "the soldier", "the child", or
-"the character".
+Only use a character's name if that exact name appears in the provided
+dialogue transcript. Do not use outside knowledge of any movie, show,
+or franchise to identify or name a character, even if you recognize
+who they might be — the dialogue transcript is the ONLY source for
+names.
+
+If a character's name is not given in the dialogue, describe the
+character using a neutral, consistent label instead, such as "the man",
+"the woman", "the character with spiky hair", "the taller character",
+or "the character in dark clothing". Reuse the SAME label for the same
+character throughout your answer — do not switch labels mid-description.
 
 Do not infer events that cannot be supported by the video or dialogue.
 
@@ -205,6 +213,7 @@ If a section does not contain enough information, write:
 
 Not identified.
 """.strip()
+
 
 def _load_qwen_model(
     model_name: str,

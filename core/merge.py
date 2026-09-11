@@ -1,20 +1,18 @@
 """
 Junta falas e descrições de cena.
 
-No modo "fala", cada descrição de cena é associada
-à fala correspondente pelo timestamp.
+Cada cena analisada (que pode agrupar uma ou várias falas) vira um
+item "acao" independente na timeline, posicionado no timestamp de
+início da cena — antes das falas que pertencem a ela. Isso evita que,
+em cenas com múltiplas falas, só a primeira receba a anotação visual.
 
 Resultado:
 
 [
-    {
-        "type": "fala",
-        "start": 2.84,
-        "end": 8.54,
-        "speaker": "SPEAKER_03",
-        "text": "...",
-        "acao": "..."
-    }
+    {"type": "acao", "start": 2.84, "description": "..."},
+    {"type": "fala", "start": 2.84, "end": 8.54, "speaker": "SPEAKER_03", "text": "..."},
+    {"type": "fala", "start": 8.56, "end": 9.72, "speaker": "SPEAKER_03", "text": "..."},
+    ...
 ]
 """
 
@@ -28,112 +26,41 @@ def merge_timeline(
 
     timeline = []
 
-    # ============================================================
-    # Cria índice das cenas por timestamp
-    # ============================================================
-
-    scene_by_timestamp = {}
-
-    if scenes:
-        for scene in scenes:
-
-            description = str(
-                scene.get("description", "")
-            ).strip()
-
-            if not description:
-                continue
-
-            timestamp = float(
-                scene.get("timestamp", 0)
-            )
-
-            scene_by_timestamp[timestamp] = description
-
-    # ============================================================
-    # Junta cada fala com sua ação
-    # ============================================================
-
     for seg in segments:
 
-        start = float(
-            seg.get("start", 0)
+        start = float(seg.get("start", 0))
+        end = float(seg.get("end", start))
+
+        timeline.append(
+            {
+                "type": "fala",
+                "start": start,
+                "end": end,
+                "speaker": seg.get("speaker", ""),
+                "text": seg.get("text", ""),
+            }
         )
-
-        end = float(
-            seg.get("end", start)
-        )
-
-        item = {
-            "type": "fala",
-            "start": start,
-            "end": end,
-            "speaker": seg.get(
-                "speaker",
-                "",
-            ),
-            "text": seg.get(
-                "text",
-                "",
-            ),
-        }
-
-        # --------------------------------------------------------
-        # Procura ação correspondente
-        # --------------------------------------------------------
-
-        description = scene_by_timestamp.get(
-            start
-        )
-
-        if description:
-
-            item["acao"] = description
-
-        timeline.append(item)
-
-    # ============================================================
-    # Cenas que não pertencem a nenhuma fala
-    #
-    # Útil caso futuramente o modo "intervalo" seja usado.
-    # ============================================================
-
-    fala_timestamps = {
-        float(seg.get("start", 0))
-        for seg in segments
-    }
 
     if scenes:
-
         for scene in scenes:
 
-            description = str(
-                scene.get("description", "")
-            ).strip()
+            description = str(scene.get("description", "")).strip()
 
             if not description:
                 continue
 
-            timestamp = float(
-                scene.get("timestamp", 0)
+            timeline.append(
+                {
+                    "type": "acao",
+                    "start": float(scene.get("timestamp", 0)),
+                    "description": description,
+                }
             )
 
-            # Já foi associada a uma fala
-            if timestamp in fala_timestamps:
-                continue
-
-            timeline.append({
-                "type": "acao",
-                "start": timestamp,
-                "description": description,
-            })
-
-    # ============================================================
-    # Ordena
-    # ============================================================
-
-    timeline.sort(
-        key=lambda item: item["start"]
-    )
+    # Ordena por tempo; em empate (ação e fala no mesmo timestamp,
+    # comum quando a cena começa exatamente na primeira fala), a ação
+    # vem antes — faz mais sentido ler o contexto da cena antes do
+    # diálogo que acontece dentro dela.
+    timeline.sort(key=lambda item: (item["start"], item["type"] != "acao"))
 
     return timeline
