@@ -21,15 +21,21 @@ fonte original.
    vários frames espalhados pela duração inteira dela e pede pro
    modelo descrever ambiente, ações, personagens e eventos, usando
    **todo o diálogo da cena** como contexto (não frase a frase)
-6. **Síntese final** — uma chamada só de texto (sem reprocessar
-   frames) junta as análises de todas as cenas numa narrativa
-   cronológica única do episódio inteiro
-7. **Validação** — uma segunda passada confere essa síntese contra as
+6. **Consistência de personagens entre cenas** — depois de analisar
+   todas as cenas, monta uma ficha por personagem (juntando o que
+   apareceu em cada uma) e reescreve as cenas usando nomes/rótulos
+   consistentes — corrige referências vagas de cenas antigas quando o
+   personagem só ficou claro depois, sem reprocessar nenhum frame
+7. **Síntese final** — uma chamada só de texto (sem reprocessar
+   frames) junta as análises de todas as cenas (já com nomes
+   consistentes) numa narrativa cronológica única do episódio inteiro
+8. **Validação** — uma segunda passada confere essa síntese contra as
    análises de cena originais e corrige inconsistências: nomes que não
    aparecem no diálogo, eventos mal atribuídos, erros de escrita,
    markdown solto
-8. **Saída final** — roteiro (`.txt`, `.json`, `.srt`) + a análise
-   consolidada e validada (`_analise.txt`)
+9. **Saída final** — roteiro (`.txt`, `.json`, `.srt`) + a análise
+   consolidada e validada (`_analise.txt`) + a ficha de personagens
+   (`_fichas_personagens.txt`)
 
 ## Instalação
 
@@ -120,16 +126,31 @@ python app.py processar caminho/do/episodio.mp4 --sem-cena
 # Além de gerar a saída normal, grava todas as cenas processadas no
 # dataset de exemplos (veja seção "Dataset de exemplos" abaixo)
 python app.py processar caminho/do/episodio.mp4 --save
+
+# Abre a ficha de personagens no editor pra você corrigir antes dela
+# ser usada na reescrita das cenas
+python app.py processar caminho/do/episodio.mp4 --revisar-fichas
+
+# Reaproveita a ficha de personagens de outro episódio da mesma série
+# (evita redescobrir os personagens do zero a cada episódio)
+python app.py processar episodio02.mp4 --fichas resultados/episodio01_fichas_personagens.txt
 ```
 
 Os arquivos de saída vão para a pasta `resultados/`:
 - `<nome>.txt`, `<nome>.json`, `<nome>.srt` — roteiro (falas + ações)
 - `<nome>_analise.txt` — a síntese narrativa final, já validada
+- `<nome>_fichas_personagens.txt` — ficha consolidada de personagens,
+  editável e reaproveitável em outros episódios (veja `--fichas`)
+- `<nome>_revisao_visual_pendente.txt` — só aparece se alguma cena
+  ficou com identidade de personagem ambígua mesmo depois da ficha;
+  lista candidatas a reprocessamento visual manual
 
 Os resultados intermediários ficam em cache dentro de `temp/cache/`,
-por etapa (`falas`, `cenas`, `analise_rascunho`, `analise_validada`) —
-se uma etapa já rodou, `processar` reaproveita o cache em vez de
-refazer o trabalho (a menos que você use `--forcar`).
+por etapa (`falas`, `cenas`, `fichas_personagens`, `cenas_consistentes`,
+`analise_rascunho`, `analise_validada`) — se uma etapa já rodou,
+`processar` reaproveita o cache em vez de refazer o trabalho (a menos
+que você use `--forcar`, ou `--fichas`/`--revisar-fichas`, que sempre
+refazem a etapa de consistência de personagens).
 
 ## Uso via interface web
 
@@ -202,6 +223,49 @@ mas errados (`Vegata`, `Veggies`, `Goham's`) ou números inventados
 
 A etapa de validação reforça essa checagem numa segunda passada,
 comparando a síntese final contra as análises de cena originais.
+
+## Ficha de personagens entre cenas
+
+Cada cena é analisada isoladamente (sem "memória" das outras), então
+um mesmo personagem pode acabar com rótulos diferentes em cenas
+diferentes — ou só ser identificado pelo nome numa cena tardia, mesmo
+já tendo aparecido (sem nome) bem antes. Pra resolver isso:
+
+1. Depois que todas as cenas são analisadas, uma chamada só de texto
+   junta tudo e monta uma **ficha por personagem** (nome exato do
+   diálogo, ou rótulo neutro + descrição física consistente).
+2. Cada cena é **reescrita** usando essa ficha — sem reprocessar
+   nenhum frame — corrigindo referências vagas de cenas antigas quando
+   o personagem só ficou claro depois (o "efeito retrospecto": saber
+   quem é alguém no fim do episódio ajuda a corrigir como ele foi
+   descrito lá no início).
+3. Quando o modelo **não consegue** vincular uma cena a um personagem
+   da ficha com confiança, ele não chuta — mantém a referência neutra
+   original e marca a cena em `<nome>_revisao_visual_pendente.txt`,
+   candidata a reprocessamento visual manual (só essa cena, não o
+   episódio inteiro).
+
+### Revisando ou reaproveitando a ficha
+
+A ficha sai como texto simples em `resultados/<nome>_fichas_personagens.txt`,
+editável a qualquer momento:
+
+```bash
+# Corrige a ficha manualmente antes dela ser aplicada nas cenas
+python app.py processar episodio.mp4 --revisar-fichas
+
+# Reaproveita a ficha de um episódio anterior da mesma série, em vez
+# de descobrir os personagens do zero de novo
+python app.py processar episodio02.mp4 --fichas resultados/episodio01_fichas_personagens.txt
+```
+
+Configurável em `config.yaml`:
+- `enable_character_consistency`: desliga essa etapa inteira (`false`)
+  se quiser comparar o resultado com/sem ela
+- `character_sheet_max_new_tokens`: espaço de geração pra ficha
+  consolidada (documento com todos os personagens de uma vez)
+- `consistency_max_new_tokens`: espaço de geração pra reescrita de
+  **uma** cena por vez
 
 ## Dataset de exemplos (few-shot e fine-tuning futuro)
 
@@ -278,6 +342,7 @@ transcritor_app/
 │   ├── speaker_mapping.py     # SPEAKER_00 -> nome do personagem
 │   ├── scene_analysis.py      # agrupamento em cenas + análise visual (Qwen2.5-VL)
 │   ├── context_analysis.py    # síntese narrativa final + validação
+│   ├── character_consistency.py  # ficha de personagens + reescrita consistente
 │   ├── merge.py               # junta falas + ações em uma timeline
 │   ├── cache.py               # cache em JSON dos resultados intermediários
 │   └── dataset_builder.py     # dataset de exemplos corrigidos (few-shot / fine-tuning)
@@ -304,6 +369,12 @@ transcritor_app/
   passada do mesmo tipo de modelo, então pode não pegar 100% dos
   problemas — vale sempre uma revisão humana rápida no `_analise.txt`
   final antes de considerar definitivo.
+- **A ficha de personagens só corrige o que já foi descrito em
+  texto**: se a análise original de uma cena foi rasa demais (não
+  mencionou nenhum traço visual distintivo do personagem), a reescrita
+  não tem como "adivinhar" a identidade — só reprocessando os frames
+  daquela cena resolveria (por isso a sinalização em
+  `_revisao_visual_pendente.txt` em vez de simplesmente chutar).
 - **Custo de GPU**: rodar localmente sem GPU Nvidia decente é
   impraticável pras etapas de cena, síntese e validação. O Google
   Colab (gratuito, com T4) é a opção mais acessível pra quem não tem
