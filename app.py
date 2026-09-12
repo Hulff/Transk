@@ -25,6 +25,10 @@ from core.context_analysis import (
     validate_analysis,
     save_analysis,
 )
+from core.character_consistency import (
+    build_character_sheets,
+    apply_character_consistency,
+)
 from core.merge import merge_timeline
 from core.cache import (
     save_cache,
@@ -272,6 +276,16 @@ def processar(
         "--save",
         help="Ao final, grava todas as cenas processadas no dataset (dataset/dataset.jsonl), pendentes de revisão manual.",
     ),
+    fichas: str = typer.Option(
+        None,
+        "--fichas",
+        help="Caminho de um arquivo de fichas de personagens já existente (ex: de outro episódio da mesma série), pra reaproveitar em vez de gerar do zero.",
+    ),
+    revisar_fichas: bool = typer.Option(
+        False,
+        "--revisar-fichas",
+        help="Abre a ficha de personagens no editor de texto pra você corrigir antes dela ser usada na reescrita das cenas.",
+    ),
 ):
 
     cfg = load_config(config_path)
@@ -331,6 +345,93 @@ def processar(
     else:
 
         typer.echo("Análise visual desabilitada.")
+
+    # ---------------------------------------------------------
+    # CONSISTÊNCIA DE PERSONAGENS ENTRE CENAS
+    # ---------------------------------------------------------
+
+    if scenes and cfg["scene_analysis"].get("enable_character_consistency", True):
+
+        pular_cache_consistencia = forcar or fichas or revisar_fichas
+
+        if not pular_cache_consistencia and has_cache(base_name, "cenas_consistentes"):
+
+            typer.echo("Cenas com consistência de personagens encontradas no cache.")
+
+            scenes = load_cache(base_name, "cenas_consistentes")
+
+        else:
+
+            contexts = [
+                {
+                    "start": scene.get("timestamp"),
+                    "end": scene.get("end"),
+                    "context": scene.get("description", ""),
+                    "dialogue": scene.get("dialogue", ""),
+                }
+                for scene in scenes
+            ]
+
+            if fichas:
+                typer.echo(f"Carregando ficha de personagens de: {fichas}")
+                sheets = Path(fichas).read_text(encoding="utf-8")
+            elif not forcar and has_cache(base_name, "fichas_personagens"):
+                typer.echo("Fichas de personagens encontradas no cache.")
+                sheets = load_cache(base_name, "fichas_personagens")
+            else:
+                typer.echo(
+                    "Montando fichas de personagens (juntando todas as cenas)..."
+                )
+                sheets = build_character_sheets(contexts, cfg)
+
+            if revisar_fichas:
+                typer.echo("Abrindo ficha de personagens pra revisão...")
+                edited = typer.edit(sheets)
+                if edited is not None and edited.strip():
+                    sheets = edited
+
+            save_cache(base_name, "fichas_personagens", sheets)
+
+            fichas_path = (
+                Path(cfg["output"]["output_dir"])
+                / f"{base_name}_fichas_personagens.txt"
+            )
+            fichas_path.parent.mkdir(parents=True, exist_ok=True)
+            fichas_path.write_text(sheets.strip() + "\n", encoding="utf-8")
+            typer.echo(f"Ficha de personagens salva em: {fichas_path}")
+            typer.echo(
+                "(reaproveite em outro episódio da mesma série com "
+                f"--fichas {fichas_path})"
+            )
+
+            typer.echo("Reescrevendo cenas com referências consistentes...")
+            consistency_results = apply_character_consistency(contexts, sheets, cfg)
+
+            for scene, result in zip(scenes, consistency_results):
+                scene["description_original"] = scene.get("description", "")
+                scene["description"] = result["enriched_description"]
+                scene["needs_visual_review"] = result["needs_visual_review"]
+                scene["review_reason"] = result["review_reason"]
+
+            save_cache(base_name, "cenas_consistentes", scenes)
+
+        pendentes = [s for s in scenes if s.get("needs_visual_review")]
+        if pendentes:
+            review_path = (
+                Path(cfg["output"]["output_dir"])
+                / f"{base_name}_revisao_visual_pendente.txt"
+            )
+            review_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(review_path, "w", encoding="utf-8") as f:
+                for scene in pendentes:
+                    f.write(
+                        f"[{scene.get('timestamp'):.1f}s - {scene.get('end'):.1f}s] "
+                        f"{scene.get('review_reason', '')}\n"
+                    )
+            typer.echo(
+                f"\n{len(pendentes)} cena(s) sinalizada(s) como possivelmente precisando "
+                f"de reanálise visual — veja {review_path}"
+            )
 
     # ---------------------------------------------------------
     # TIMELINE FINAL

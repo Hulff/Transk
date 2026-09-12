@@ -34,6 +34,13 @@ scene_analysis:
 
   validation_max_new_tokens: 1200   # etapa de revisão da análise final (documento inteiro, precisa de mais espaço)
 
+  # Consistência de personagens entre cenas: monta uma ficha por
+  # personagem (juntando todas as cenas) e reescreve cada cena usando
+  # nomes/rótulos consistentes - só texto, sem reprocessar frames.
+  enable_character_consistency: true
+  character_sheet_max_new_tokens: 800   # ficha consolidada (documento com todos os personagens)
+  consistency_max_new_tokens: 300       # reescrita de UMA cena por vez
+
   repetition_penalty: 1.15
   # no_repeat_ngram_size bane qualquer sequência de N tokens repetida em
   # TODA a entrada (incluindo o prompt) — em prompts longos e repetitivos
