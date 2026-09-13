@@ -1,29 +1,22 @@
 """
 Identity Resolver
 
-Resolve a identidade global de personagens combinando:
+Resolve a identidade global dos personagens combinando:
 
-- identidade do speaker produzida pela diarização;
-- evidência de voz;
-- descritores visuais produzidos pelo Qwen2.5-VL;
-- histórico das cenas;
-- ficha de personagens previamente conhecida.
+- speaker_id produzido pela diarização;
+- evidência de reconhecimento de voz;
+- associações visuais produzidas pelo Qwen2.5-VL;
+- descritores visuais;
+- continuidade temporal;
+- contexto da cena.
 
-Princípio importante:
+Princípio:
 
-O Qwen NÃO decide sozinho quem é o personagem.
+    Qwen -> fornece evidência visual.
+    Speaker mapping -> fornece evidência de voz.
+    Identity Resolver -> decide a identidade global.
 
-O Qwen fornece evidência visual.
-O speaker mapping fornece evidência de voz.
-Este módulo combina essas evidências e produz:
-
-    character_id
-    status
-    confidence
-    visual_score
-    voice_score
-    temporal_score
-    context_score
+O resolver NUNCA deve simplesmente confiar no nome produzido pelo Qwen.
 
 Status possíveis:
 
@@ -34,20 +27,18 @@ Status possíveis:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 import re
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constantes
 # ---------------------------------------------------------------------------
-
 
 UNKNOWN_VALUES = {
     "",
     "unknown",
     "unk",
-    "unknown",
     "indeterminado",
     "não identificado",
     "nao identificado",
@@ -56,7 +47,24 @@ UNKNOWN_VALUES = {
     "none",
     "null",
     "n/a",
+    "na",
 }
+
+
+VISUAL_WEIGHTS = {
+    "distinctive_features": 0.25,
+    "hair": 0.20,
+    "face": 0.20,
+    "body": 0.15,
+    "skin": 0.10,
+    "clothing": 0.07,
+    "accessories": 0.03,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _normalize_text(value: Any) -> str:
@@ -64,7 +72,6 @@ def _normalize_text(value: Any) -> str:
         return ""
 
     text = str(value).strip().lower()
-
     text = re.sub(r"\s+", " ", text)
 
     return text
@@ -91,11 +98,6 @@ def _as_list(value: Any) -> list:
 
 
 def _flatten_text(value: Any) -> list[str]:
-    """
-    Converte valores simples/listas/dicionários em uma lista de textos
-    comparáveis.
-    """
-
     if value is None:
         return []
 
@@ -124,8 +126,23 @@ def _flatten_text(value: Any) -> list[str]:
     return [text]
 
 
+def _clean_speaker_id(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    if _is_unknown(text):
+        return None
+
+    return text
+
+
 # ---------------------------------------------------------------------------
-# Estrutura
+# Estruturas
 # ---------------------------------------------------------------------------
 
 
@@ -138,6 +155,8 @@ class IdentityMatch:
     context_score: float
     identity_score: float
     status: str
+    margin: float = 0.0
+    candidate_character_ids: list[str] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -148,49 +167,124 @@ class IdentityMatch:
             "context_score": round(self.context_score, 4),
             "identity_score": round(self.identity_score, 4),
             "status": self.status,
+            "margin": round(self.margin, 4),
+            "candidate_character_ids": self.candidate_character_ids or [],
         }
 
 
 # ---------------------------------------------------------------------------
-# Normalização dos descritores
+# Speaker associations
+# ---------------------------------------------------------------------------
+
+
+def _normalize_association(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    speaker_id = (
+        value.get("speaker_id") or value.get("speaker") or value.get("speakerId")
+    )
+
+    status = _normalize_text(value.get("status", "indeterminado"))
+
+    confidence = _normalize_text(value.get("confidence", "baixa"))
+
+    evidence = value.get("evidence", "")
+
+    return {
+        "speaker_id": _clean_speaker_id(speaker_id),
+        "status": status or "indeterminado",
+        "confidence": confidence or "baixa",
+        "evidence": str(evidence).strip() if evidence else "",
+    }
+
+
+def _extract_speaker_associations(
+    character: dict[str, Any],
+) -> list[dict[str, Any]]:
+    associations = character.get("speaker_associations", [])
+
+    if not isinstance(associations, list):
+        associations = [associations]
+
+    normalized = []
+
+    for item in associations:
+        association = _normalize_association(item)
+
+        if association.get("speaker_id"):
+            normalized.append(association)
+
+    # Compatibilidade com versões antigas.
+    direct_speaker = character.get("speaker_id") or character.get("speaker")
+
+    if direct_speaker:
+        direct_speaker = _clean_speaker_id(direct_speaker)
+
+        if direct_speaker and not any(
+            item.get("speaker_id") == direct_speaker for item in normalized
+        ):
+            normalized.append(
+                {
+                    "speaker_id": direct_speaker,
+                    "status": "indeterminado",
+                    "confidence": "baixa",
+                    "evidence": "",
+                }
+            )
+
+    return normalized
+
+
+def _extract_speaker_ids(
+    character: dict[str, Any],
+) -> list[str]:
+    result = []
+
+    for speaker_id in _as_list(character.get("speaker_ids", [])):
+        speaker_id = _clean_speaker_id(speaker_id)
+
+        if speaker_id and speaker_id not in result:
+            result.append(speaker_id)
+
+    for association in _extract_speaker_associations(character):
+        speaker_id = association.get("speaker_id")
+
+        if speaker_id and speaker_id not in result:
+            result.append(speaker_id)
+
+    direct = character.get("speaker_id") or character.get("speaker")
+
+    direct = _clean_speaker_id(direct)
+
+    if direct and direct not in result:
+        result.append(direct)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Normalização dos descritores visuais
 # ---------------------------------------------------------------------------
 
 
 def normalize_character_descriptor(
     character: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Normaliza o formato retornado pelo Qwen.
-
-    Aceita tanto:
-
-        {
-            "character_ref": "personagem_A",
-            "skin_tone": "...",
-            "hair_color": "..."
-        }
-
-    quanto:
-
-        {
-            "character_ref": "personagem_A",
-            "stable_appearance": {
-                ...
-            },
-            "temporary_appearance": {
-                ...
-            }
-        }
-
-    Retorna sempre uma estrutura padronizada.
-    """
 
     if not isinstance(character, dict):
         return {
             "character_ref": "",
+            "name": None,
             "stable_appearance": {},
             "temporary_appearance": {},
             "distinctive_features": [],
+            "speaker_ids": [],
+            "speaker_associations": [],
+            "voice_character": None,
+            "voice_score": None,
+            "voice_margin": None,
+            "voice_status": None,
         }
 
     stable = character.get("stable_appearance")
@@ -245,6 +339,10 @@ def normalize_character_descriptor(
         stable.get("distinctive_features", []),
     )
 
+    associations = _extract_speaker_associations(character)
+
+    speaker_ids = _extract_speaker_ids(character)
+
     return {
         "character_ref": character.get(
             "character_ref",
@@ -254,20 +352,18 @@ def normalize_character_descriptor(
         "stable_appearance": stable,
         "temporary_appearance": temporary,
         "distinctive_features": _as_list(distinctive),
-        "speaker_ids": _as_list(character.get("speaker_ids", [])),
+        "speaker_ids": speaker_ids,
+        "speaker_associations": associations,
         "voice_character": character.get("voice_character"),
         "voice_score": character.get("voice_score"),
+        "voice_margin": character.get("voice_margin"),
+        "voice_status": character.get("voice_status"),
     }
 
 
 def build_visual_signature(
     character: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Constrói uma assinatura visual comparável.
-
-    Características estáveis têm prioridade sobre roupa/acessórios.
-    """
 
     normalized = normalize_character_descriptor(character)
 
@@ -302,32 +398,14 @@ def build_visual_signature(
 
 
 # ---------------------------------------------------------------------------
-# Comparação visual
+# Similaridade visual
 # ---------------------------------------------------------------------------
-
-
-VISUAL_WEIGHTS = {
-    "distinctive_features": 0.25,
-    "hair": 0.20,
-    "face": 0.20,
-    "body": 0.15,
-    "skin": 0.10,
-    "clothing": 0.07,
-    "accessories": 0.03,
-}
 
 
 def _token_similarity(
     a: Any,
     b: Any,
 ) -> float | None:
-    """
-    Similaridade simples baseada em tokens.
-
-    Não tenta substituir um modelo multimodal.
-    Serve apenas para comparar descrições estruturadas produzidas
-    pelo mesmo modelo.
-    """
 
     values_a = _flatten_text(a)
     values_b = _flatten_text(b)
@@ -336,7 +414,6 @@ def _token_similarity(
         return None
 
     tokens_a = set()
-
     tokens_b = set()
 
     for value in values_a:
@@ -348,13 +425,12 @@ def _token_similarity(
     if not tokens_a or not tokens_b:
         return None
 
-    intersection = tokens_a & tokens_b
     union = tokens_a | tokens_b
 
     if not union:
         return None
 
-    return len(intersection) / len(union)
+    return len(tokens_a & tokens_b) / len(union)
 
 
 def _field_similarity(
@@ -362,6 +438,7 @@ def _field_similarity(
     b: dict,
     fields: list[str],
 ) -> float | None:
+
     scores = []
 
     for field in fields:
@@ -383,6 +460,7 @@ def _distinctive_similarity(
     a: dict,
     b: dict,
 ) -> float | None:
+
     return _token_similarity(
         a.get("distinctive_features"),
         b.get("distinctive_features"),
@@ -393,13 +471,6 @@ def visual_similarity(
     a: dict[str, Any],
     b: dict[str, Any],
 ) -> float:
-    """
-    Compara duas descrições visuais.
-
-    Roupa e acessórios possuem peso baixo porque podem mudar.
-
-    Cabelo, rosto e características distintivas possuem peso maior.
-    """
 
     sig_a = build_visual_signature(a)
     sig_b = build_visual_signature(b)
@@ -407,19 +478,12 @@ def visual_similarity(
     weighted_scores = []
     total_weight = 0.0
 
-    # Características distintivas
     score = _distinctive_similarity(sig_a, sig_b)
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["distinctive_features"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["distinctive_features"]))
         total_weight += VISUAL_WEIGHTS["distinctive_features"]
 
-    # Cabelo
     score = _field_similarity(
         sig_a,
         sig_b,
@@ -431,15 +495,9 @@ def visual_similarity(
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["hair"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["hair"]))
         total_weight += VISUAL_WEIGHTS["hair"]
 
-    # Rosto
     score = _field_similarity(
         sig_a,
         sig_b,
@@ -455,15 +513,9 @@ def visual_similarity(
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["face"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["face"]))
         total_weight += VISUAL_WEIGHTS["face"]
 
-    # Corpo
     score = _field_similarity(
         sig_a,
         sig_b,
@@ -475,30 +527,18 @@ def visual_similarity(
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["body"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["body"]))
         total_weight += VISUAL_WEIGHTS["body"]
 
-    # Pele
     score = _token_similarity(
         sig_a.get("skin_tone"),
         sig_b.get("skin_tone"),
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["skin"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["skin"]))
         total_weight += VISUAL_WEIGHTS["skin"]
 
-    # Roupa
     score = _field_similarity(
         sig_a,
         sig_b,
@@ -510,15 +550,9 @@ def visual_similarity(
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["clothing"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["clothing"]))
         total_weight += VISUAL_WEIGHTS["clothing"]
 
-    # Acessórios
     score = _field_similarity(
         sig_a,
         sig_b,
@@ -530,23 +564,64 @@ def visual_similarity(
     )
 
     if score is not None:
-        weighted_scores.append(
-            (
-                score,
-                VISUAL_WEIGHTS["accessories"],
-            )
-        )
+        weighted_scores.append((score, VISUAL_WEIGHTS["accessories"]))
         total_weight += VISUAL_WEIGHTS["accessories"]
 
     if total_weight == 0:
         return 0.0
 
-    score = sum(value * weight for value, weight in weighted_scores) / total_weight
+    result = sum(score * weight for score, weight in weighted_scores) / total_weight
 
-    return max(
-        0.0,
-        min(1.0, score),
-    )
+    return max(0.0, min(1.0, result))
+
+
+# ---------------------------------------------------------------------------
+# Associação visual -> speaker
+# ---------------------------------------------------------------------------
+
+
+def speaker_association_score(
+    scene_character: dict[str, Any],
+    known_character: dict[str, Any],
+) -> float:
+
+    scene_associations = _extract_speaker_associations(scene_character)
+
+    scene_speakers = set(_extract_speaker_ids(scene_character))
+
+    known_speakers = set(_extract_speaker_ids(known_character))
+
+    if scene_speakers and known_speakers:
+        overlap = scene_speakers & known_speakers
+
+        if overlap:
+            return 1.0
+
+    for association in scene_associations:
+        speaker_id = association.get("speaker_id")
+
+        if not speaker_id or speaker_id not in known_speakers:
+            continue
+
+        status = association.get("status", "")
+
+        confidence = association.get("confidence", "")
+
+        if status in {
+            "confirmado",
+            "confirmed",
+        }:
+            return 1.0
+
+        if confidence == "alta":
+            return 0.95
+
+        if confidence == "media":
+            return 0.80
+
+        return 0.65
+
+    return 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -558,25 +633,10 @@ def temporal_similarity(
     scene_character: dict[str, Any],
     known_character: dict[str, Any],
 ) -> float:
-    """
-    Avalia continuidade temporal.
 
-    Atualmente é conservadora.
+    scene_speakers = set(_extract_speaker_ids(scene_character))
 
-    Speaker IDs iguais recebem forte evidência.
-    Character refs iguais também ajudam.
-
-    Isso evita que duas pessoas visualmente parecidas sejam
-    constantemente trocadas.
-    """
-
-    scene_speakers = set(
-        str(x) for x in _as_list(scene_character.get("speaker_ids", [])) if x
-    )
-
-    known_speakers = set(
-        str(x) for x in _as_list(known_character.get("speaker_ids", [])) if x
-    )
+    known_speakers = set(_extract_speaker_ids(known_character))
 
     if scene_speakers and known_speakers:
         if scene_speakers & known_speakers:
@@ -603,30 +663,25 @@ def context_similarity(
     scene_character: dict[str, Any],
     known_character: dict[str, Any],
 ) -> float:
-    """
-    Compara informações contextuais simples.
-
-    Essa função propositalmente não tenta inferir identidade através
-    de conhecimento externo.
-    """
 
     scores = []
 
     scene_voice = _normalize_text(scene_character.get("voice_character"))
 
-    known_name = _normalize_text(known_character.get("name"))
+    known_voice = _normalize_text(known_character.get("voice_character"))
 
-    if scene_voice and known_name:
-        if scene_voice == known_name:
-            scores.append(1.0)
-        else:
-            scores.append(0.0)
+    known_name = _normalize_text(known_character.get("name"))
 
     scene_name = _normalize_text(scene_character.get("name"))
 
+    if scene_voice and known_voice:
+        scores.append(1.0 if scene_voice == known_voice else 0.0)
+
+    if scene_voice and known_name:
+        scores.append(1.0 if scene_voice == known_name else 0.0)
+
     if scene_name and known_name:
-        if scene_name == known_name:
-            scores.append(1.0)
+        scores.append(1.0 if scene_name == known_name else 0.0)
 
     if not scores:
         return 0.5
@@ -635,46 +690,159 @@ def context_similarity(
 
 
 # ---------------------------------------------------------------------------
-# Voice
+# Voz
 # ---------------------------------------------------------------------------
+
+
+def _voice_evidence_from_item(
+    item: Any,
+) -> list[dict[str, Any]]:
+
+    if not isinstance(item, dict):
+        return []
+
+    result = []
+
+    speaker_id = item.get("speaker_id") or item.get("speaker")
+
+    speaker_id = _clean_speaker_id(speaker_id)
+
+    character_name = (
+        item.get("character_name")
+        or item.get("character")
+        or item.get("voice_character")
+    )
+
+    voice_score = item.get("voice_score")
+    voice_margin = item.get("voice_margin")
+    voice_status = item.get("voice_status")
+
+    voice_match = item.get("voice_match")
+
+    if isinstance(voice_match, dict):
+        character_name = (
+            voice_match.get("character")
+            or voice_match.get("character_name")
+            or character_name
+        )
+
+        voice_score = (
+            voice_match.get("score")
+            if voice_match.get("score") is not None
+            else voice_score
+        )
+
+        voice_margin = (
+            voice_match.get("margin")
+            if voice_match.get("margin") is not None
+            else voice_margin
+        )
+
+    if character_name:
+        result.append(
+            {
+                "speaker_id": speaker_id,
+                "character": character_name,
+                "score": voice_score,
+                "margin": voice_margin,
+                "status": voice_status,
+            }
+        )
+
+    return result
+
+
+def extract_voice_evidence(
+    scene: dict[str, Any],
+) -> list[dict[str, Any]]:
+
+    evidence = []
+
+    candidate_containers = [
+        scene.get("segments"),
+        scene.get("dialogue_segments"),
+        scene.get("speaker_segments"),
+        scene.get("timeline"),
+    ]
+
+    for container in candidate_containers:
+        if not isinstance(container, list):
+            continue
+
+        for item in container:
+            evidence.extend(_voice_evidence_from_item(item))
+
+    # A própria cena também pode conter evidência.
+    evidence.extend(_voice_evidence_from_item(scene))
+
+    return evidence
 
 
 def voice_score_for_character(
     scene_character: dict[str, Any],
     known_character: dict[str, Any],
+    voice_evidence: list[dict[str, Any]] | None = None,
 ) -> float:
-    """
-    Retorna a evidência de voz disponível para essa identidade.
-    """
 
-    scene_voice_character = _normalize_text(scene_character.get("voice_character"))
+    known_id = known_character.get("character_id")
 
     known_name = _normalize_text(known_character.get("name"))
 
-    if scene_voice_character and known_name:
-        if scene_voice_character == known_name:
-            raw_score = scene_character.get(
-                "voice_score",
-                1.0,
+    known_voice = _normalize_text(known_character.get("voice_character"))
+
+    known_speakers = set(_extract_speaker_ids(known_character))
+
+    scene_voice = _normalize_text(scene_character.get("voice_character"))
+
+    if scene_voice:
+        if known_name and scene_voice == known_name:
+            return 1.0
+
+        if known_voice and scene_voice == known_voice:
+            return 1.0
+
+        if known_name or known_voice:
+            return 0.0
+
+    if voice_evidence:
+        scores = []
+
+        for evidence in voice_evidence:
+            speaker_id = evidence.get("speaker_id")
+            character = _normalize_text(evidence.get("character"))
+
+            if speaker_id and speaker_id not in known_speakers:
+                continue
+
+            matches_name = character and (
+                character == known_name
+                or character == known_voice
+                or character == _normalize_text(known_id)
             )
 
+            if not matches_name:
+                continue
+
+            score = evidence.get("score")
+
             try:
-                return max(
-                    0.0,
-                    min(1.0, float(raw_score)),
-                )
+                score = float(score)
             except (TypeError, ValueError):
-                return 1.0
+                score = None
 
-        return 0.0
+            if score is not None:
+                scores.append(max(0.0, min(1.0, score)))
+            else:
+                scores.append(1.0)
 
-    # Caso voice_character ainda seja o ID do speaker,
-    # não temos uma associação direta com o personagem.
+        if scores:
+            return max(scores)
+
     return 0.5
 
 
 # ---------------------------------------------------------------------------
-# Match
+# Matching
 # ---------------------------------------------------------------------------
 
 
@@ -682,91 +850,124 @@ def match_character(
     scene_character: dict[str, Any],
     known_characters: list[dict[str, Any]],
     *,
+    voice_evidence: list[dict[str, Any]] | None = None,
     visual_weight: float = 0.40,
     voice_weight: float = 0.35,
     temporal_weight: float = 0.15,
     context_weight: float = 0.10,
     confirmed_threshold: float = 0.80,
     probable_threshold: float = 0.65,
+    confirmed_margin: float = 0.10,
+    probable_margin: float = 0.05,
 ) -> IdentityMatch | None:
-    """
-    Encontra o personagem conhecido mais provável.
-    """
 
     if not known_characters:
         return None
 
-    candidates = []
+    normalized_scene = normalize_character_descriptor(scene_character)
+
+    scored = []
 
     for known in known_characters:
-        character_id = known.get("character_id")
-
-        if not character_id:
-            continue
-
         visual = visual_similarity(
-            scene_character,
+            normalized_scene,
             known,
         )
 
         voice = voice_score_for_character(
-            scene_character,
+            normalized_scene,
             known,
+            voice_evidence,
         )
 
         temporal = temporal_similarity(
-            scene_character,
+            normalized_scene,
             known,
         )
 
         context = context_similarity(
-            scene_character,
+            normalized_scene,
             known,
         )
 
-        score = (
+        speaker_score = speaker_association_score(
+            normalized_scene,
+            known,
+        )
+
+        # A associação explícita speaker -> personagem é incorporada
+        # ao componente temporal, sem permitir que ela ignore totalmente
+        # uma forte contradição visual.
+        temporal = max(
+            temporal,
+            speaker_score * 0.90,
+        )
+
+        total = (
             visual * visual_weight
             + voice * voice_weight
             + temporal * temporal_weight
             + context * context_weight
         )
 
-        candidates.append(
-            IdentityMatch(
-                character_id=character_id,
-                visual_score=visual,
-                voice_score=voice,
-                temporal_score=temporal,
-                context_score=context,
-                identity_score=score,
-                status="",
-            )
+        scored.append(
+            {
+                "character": known,
+                "visual": visual,
+                "voice": voice,
+                "temporal": temporal,
+                "context": context,
+                "total": total,
+            }
         )
 
-    if not candidates:
-        return None
-
-    candidates.sort(
-        key=lambda item: item.identity_score,
+    scored.sort(
+        key=lambda item: item["total"],
         reverse=True,
     )
 
-    best = candidates[0]
+    best = scored[0]
 
-    second_score = candidates[1].identity_score if len(candidates) > 1 else 0.0
+    second_score = scored[1]["total"] if len(scored) > 1 else 0.0
 
-    margin = best.identity_score - second_score
+    margin = best["total"] - second_score
 
-    if best.identity_score >= confirmed_threshold and margin >= 0.10:
-        best.status = "CONFIRMADO"
+    candidate_ids = []
 
-    elif best.identity_score >= probable_threshold and margin >= 0.05:
-        best.status = "PROVÁVEL"
+    # Todos os candidatos próximos do melhor resultado.
+    for item in scored:
+        if best["total"] - item["total"] <= max(
+            probable_margin,
+            0.05,
+        ):
+            character_id = item["character"].get("character_id")
+
+            if character_id:
+                candidate_ids.append(character_id)
+
+    if best["total"] >= confirmed_threshold and margin >= confirmed_margin:
+        status = "CONFIRMADO"
+
+    elif best["total"] >= probable_threshold and margin >= probable_margin:
+        status = "PROVÁVEL"
 
     else:
-        best.status = "AMBÍGUO"
+        status = "AMBÍGUO"
 
-    return best
+    return IdentityMatch(
+        character_id=best["character"].get(
+            "character_id",
+            "",
+        ),
+        visual_score=best["visual"],
+        voice_score=best["voice"],
+        temporal_score=best["temporal"],
+        context_score=best["context"],
+        identity_score=best["total"],
+        status=status,
+        margin=margin,
+        candidate_character_ids=candidate_ids,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -776,10 +977,9 @@ def match_character(
 
 def _new_character(
     character_id: str,
-    scene_character: dict[str, Any],
+    normalized: dict[str, Any],
     scene_index: int,
 ) -> dict[str, Any]:
-    normalized = normalize_character_descriptor(scene_character)
 
     return {
         "character_id": character_id,
@@ -793,238 +993,394 @@ def _new_character(
             "temporary_appearance",
             {},
         ),
-        "distinctive_features": normalized.get(
-            "distinctive_features",
-            [],
+        "distinctive_features": list(
+            normalized.get(
+                "distinctive_features",
+                [],
+            )
         ),
-        "speaker_ids": list(normalized.get("speaker_ids", [])),
+        "speaker_ids": list(
+            normalized.get(
+                "speaker_ids",
+                [],
+            )
+        ),
+        "speaker_associations": list(
+            normalized.get(
+                "speaker_associations",
+                [],
+            )
+        ),
         "voice_character": normalized.get("voice_character"),
         "voice_confidence": normalized.get("voice_score"),
         "visual_confidence": None,
         "identity_confidence": None,
+        "identity_status": "PROVÁVEL",
         "scenes": [scene_index],
     }
 
 
 def _merge_character_evidence(
-    character: dict[str, Any],
-    scene_character: dict[str, Any],
+    registry_item: dict[str, Any],
+    normalized: dict[str, Any],
     scene_index: int,
-    identity_match: IdentityMatch | None,
+    *,
+    visual_confidence: float | None = None,
+    identity_confidence: float | None = None,
+    identity_status: str | None = None,
 ) -> None:
-    normalized = normalize_character_descriptor(scene_character)
 
-    # Nome
+    # Nome só é aceito se for uma informação explícita.
     name = normalized.get("name")
 
-    if name and not _is_unknown(name):
-        character["name"] = name
+    if name and _is_unknown(name):
+        name = None
 
-    # Speaker
-    for speaker in normalized.get(
+    if name:
+        current_name = registry_item.get("name")
+
+        if not current_name:
+            registry_item["name"] = name
+        elif _normalize_text(current_name) != _normalize_text(name):
+            aliases = registry_item.setdefault(
+                "aliases",
+                [],
+            )
+
+            if name not in aliases:
+                aliases.append(name)
+
+    for speaker_id in normalized.get(
         "speaker_ids",
         [],
     ):
-        if speaker not in character["speaker_ids"]:
-            character["speaker_ids"].append(speaker)
+        if speaker_id not in registry_item["speaker_ids"]:
+            registry_item["speaker_ids"].append(speaker_id)
 
-    # Voz
-    if normalized.get("voice_character"):
-        character["voice_character"] = normalized["voice_character"]
+    for association in normalized.get(
+        "speaker_associations",
+        [],
+    ):
+        if association not in registry_item["speaker_associations"]:
+            registry_item["speaker_associations"].append(association)
+
+    voice_character = normalized.get("voice_character")
+
+    if voice_character:
+        registry_item["voice_character"] = voice_character
 
     voice_score = normalized.get("voice_score")
 
     if voice_score is not None:
-        try:
-            current = character.get("voice_confidence")
+        old_score = registry_item.get("voice_confidence")
 
-            if current is None:
-                character["voice_confidence"] = float(voice_score)
-            else:
-                character["voice_confidence"] = max(
-                    float(current),
-                    float(voice_score),
-                )
+        if old_score is None or voice_score > old_score:
+            registry_item["voice_confidence"] = voice_score
 
-        except (TypeError, ValueError):
-            pass
-
-    # Stable appearance
     stable = normalized.get(
         "stable_appearance",
         {},
     )
 
-    character_stable = character.setdefault(
-        "stable_appearance",
-        {},
-    )
+    if isinstance(stable, dict):
+        for key, value in stable.items():
+            if value in (None, "", []):
+                continue
 
-    for key, value in stable.items():
-        if _is_unknown(value):
-            continue
+            if (
+                key not in registry_item["stable_appearance"]
+                or not registry_item["stable_appearance"][key]
+            ):
+                registry_item["stable_appearance"][key] = value
 
-        if key not in character_stable or _is_unknown(character_stable[key]):
-            character_stable[key] = value
-
-    # Temporary appearance
     temporary = normalized.get(
         "temporary_appearance",
         {},
     )
 
-    character_temporary = character.setdefault(
-        "temporary_appearance",
-        {},
-    )
+    if isinstance(temporary, dict):
+        for key, value in temporary.items():
+            if value in (None, "", []):
+                continue
 
-    for key, value in temporary.items():
-        if _is_unknown(value):
-            continue
-
-        character_temporary[key] = value
-
-    # Distinctive features
-    features = character.setdefault(
-        "distinctive_features",
-        [],
-    )
+            registry_item["temporary_appearance"][key] = value
 
     for feature in normalized.get(
         "distinctive_features",
         [],
     ):
-        if feature not in features:
-            features.append(feature)
+        if feature not in registry_item["distinctive_features"]:
+            registry_item["distinctive_features"].append(feature)
 
-    # Scene
-    if scene_index not in character["scenes"]:
-        character["scenes"].append(scene_index)
+    if scene_index not in registry_item["scenes"]:
+        registry_item["scenes"].append(scene_index)
 
-    # Confidence
-    if identity_match is not None:
-        visual = identity_match.visual_score
+    if visual_confidence is not None:
+        old = registry_item.get("visual_confidence")
 
-        current_visual = character.get("visual_confidence")
+        if old is None or visual_confidence > old:
+            registry_item["visual_confidence"] = visual_confidence
 
-        if current_visual is None:
-            character["visual_confidence"] = visual
-        else:
-            character["visual_confidence"] = max(
-                current_visual,
-                visual,
+    if identity_confidence is not None:
+        old = registry_item.get("identity_confidence")
+
+        if old is None or identity_confidence > old:
+            registry_item["identity_confidence"] = identity_confidence
+
+    if identity_status:
+        priority = {
+            "AMBÍGUO": 0,
+            "PROVÁVEL": 1,
+            "CONFIRMADO": 2,
+        }
+
+        current = registry_item.get(
+            "identity_status",
+            "AMBÍGUO",
+        )
+
+        if priority.get(
+            identity_status,
+            0,
+        ) >= priority.get(
+            current,
+            0,
+        ):
+            registry_item["identity_status"] = identity_status
+
+
+# ---------------------------------------------------------------------------
+# Helpers de identidade
+# ---------------------------------------------------------------------------
+
+
+def _find_character_by_speaker(
+    registry: dict[str, dict[str, Any]],
+    speaker_ids: list[str],
+) -> str | None:
+
+    if not speaker_ids:
+        return None
+
+    speaker_ids = set(speaker_ids)
+
+    for character_id, character in registry.items():
+        known_speakers = set(
+            character.get(
+                "speaker_ids",
+                [],
             )
+        )
 
-        identity = identity_match.identity_score
+        if speaker_ids & known_speakers:
+            return character_id
 
-        current_identity = character.get("identity_confidence")
+    return None
 
-        if current_identity is None:
-            character["identity_confidence"] = identity
-        else:
-            character["identity_confidence"] = max(
-                current_identity,
-                identity,
-            )
+
+def _next_character_id(
+    registry: dict[str, dict[str, Any]],
+) -> str:
+
+    number = 1
+
+    while True:
+        candidate = f"character_{number:03d}"
+
+        if candidate not in registry:
+            return candidate
+
+        number += 1
+
+
+def _get_visual_characters(
+    scene: dict[str, Any],
+) -> list[dict[str, Any]]:
+
+    visual = scene.get(
+        "visual_descriptors",
+        {},
+    )
+
+    if isinstance(visual, list):
+        return [item for item in visual if isinstance(item, dict)]
+
+    if isinstance(visual, dict):
+        characters = visual.get(
+            "characters",
+            [],
+        )
+
+        if isinstance(characters, list):
+            return [item for item in characters if isinstance(item, dict)]
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Resolução principal
+# ---------------------------------------------------------------------------
 
 
 def resolve_scene_characters(
     scenes: list[dict[str, Any]],
-    previous_registry: dict[str, Any] | None = None,
     *,
+    initial_registry: dict[str, dict[str, Any]] | None = None,
     visual_weight: float = 0.40,
     voice_weight: float = 0.35,
     temporal_weight: float = 0.15,
     context_weight: float = 0.10,
     confirmed_threshold: float = 0.80,
     probable_threshold: float = 0.65,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """
-    Resolve os personagens de todas as cenas.
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
 
-    Retorna:
+    registry = {}
 
-        resolved_scenes
-        registry
-    """
-
-    registry: dict[str, dict[str, Any]] = {}
-
-    if previous_registry:
-        for character_id, character in previous_registry.items():
-            registry[character_id] = character
-
-    next_id = 1
-
-    if registry:
-        existing_numbers = []
-
-        for character_id in registry:
-            match = re.search(
-                r"(\d+)$",
-                character_id,
-            )
-
-            if match:
-                existing_numbers.append(int(match.group(1)))
-
-        if existing_numbers:
-            next_id = max(existing_numbers) + 1
+    if initial_registry:
+        for character_id, character in initial_registry.items():
+            registry[character_id] = dict(character)
 
     resolved_scenes = []
 
-    for scene_index, scene in enumerate(
-        scenes,
-        start=1,
-    ):
-        scene_copy = dict(scene)
+    for scene_index, scene in enumerate(scenes):
 
-        visual_characters = scene.get(
-            "visual_descriptors",
-            [],
-        )
+        visual_characters = _get_visual_characters(scene)
 
-        if not isinstance(
-            visual_characters,
-            list,
-        ):
-            visual_characters = []
+        voice_evidence = extract_voice_evidence(scene)
 
         scene_resolved = []
 
+        speaker_mapping = {}
+
         for visual_character in visual_characters:
+
             normalized = normalize_character_descriptor(visual_character)
 
-            # Speaker associado à evidência visual
-            speaker = visual_character.get(
-                "speaker_id",
-                visual_character.get("speaker"),
+            speaker_ids = normalized.get(
+                "speaker_ids",
+                [],
             )
 
-            if speaker:
-                normalized["speaker_ids"] = [speaker]
+            # ---------------------------------------------------------------
+            # 1. Primeiro: speaker_id conhecido
+            # ---------------------------------------------------------------
 
-            # Tenta encontrar identidade existente
-            known = list(registry.values())
-
-            match = match_character(
-                normalized,
-                known,
-                visual_weight=visual_weight,
-                voice_weight=voice_weight,
-                temporal_weight=temporal_weight,
-                context_weight=context_weight,
-                confirmed_threshold=confirmed_threshold,
-                probable_threshold=probable_threshold,
+            direct_character_id = _find_character_by_speaker(
+                registry,
+                speaker_ids,
             )
 
-            if match is not None and match.status != "AMBÍGUO":
+            match = None
+
+            if direct_character_id:
+                known = registry[direct_character_id]
+
+                visual = visual_similarity(
+                    normalized,
+                    known,
+                )
+
+                voice = voice_score_for_character(
+                    normalized,
+                    known,
+                    voice_evidence,
+                )
+
+                temporal = temporal_similarity(
+                    normalized,
+                    known,
+                )
+
+                context = context_similarity(
+                    normalized,
+                    known,
+                )
+
+                identity_score = (
+                    visual * visual_weight
+                    + voice * voice_weight
+                    + temporal * temporal_weight
+                    + context * context_weight
+                )
+
+                # Se houver uma contradição visual muito forte,
+                # não forçamos a identidade.
+                if visual >= 0.15 or voice >= 0.75:
+                    status = "CONFIRMADO"
+
+                    if identity_score < probable_threshold:
+                        status = "PROVÁVEL"
+
+                    match = IdentityMatch(
+                        character_id=direct_character_id,
+                        visual_score=visual,
+                        voice_score=voice,
+                        temporal_score=temporal,
+                        context_score=context,
+                        identity_score=identity_score,
+                        status=status,
+                        margin=1.0,
+                        candidate_character_ids=[direct_character_id],
+                    )
+
+            # ---------------------------------------------------------------
+            # 2. Matching geral
+            # ---------------------------------------------------------------
+
+            if match is None and registry:
+
+                match = match_character(
+                    normalized,
+                    list(registry.values()),
+                    voice_evidence=voice_evidence,
+                    visual_weight=visual_weight,
+                    voice_weight=voice_weight,
+                    temporal_weight=temporal_weight,
+                    context_weight=context_weight,
+                    confirmed_threshold=confirmed_threshold,
+                    probable_threshold=probable_threshold,
+                )
+
+            # ---------------------------------------------------------------
+            # 3. Decisão
+            # ---------------------------------------------------------------
+
+            character_id = None
+
+            if match and match.status in {
+                "CONFIRMADO",
+                "PROVÁVEL",
+            }:
                 character_id = match.character_id
 
-            else:
-                character_id = f"character_{next_id:03d}"
+            elif match and match.status == "AMBÍGUO":
 
-                next_id += 1
+                # IMPORTANTE:
+                # Não criamos outro personagem apenas porque a cena
+                # ficou ambígua.
+                #
+                # Isso evita:
+                #
+                # cena 1 -> character_001
+                # cena 2 -> character_002
+                # cena 3 -> character_001
+                #
+                # quando na verdade é o mesmo personagem.
+
+                candidate_ids = match.candidate_character_ids or []
+
+                if len(candidate_ids) == 1:
+                    character_id = candidate_ids[0]
+
+            # ---------------------------------------------------------------
+            # 4. Primeiro aparecimento sem candidato
+            # ---------------------------------------------------------------
+
+            if character_id is None and not registry:
+                character_id = _next_character_id(registry)
 
                 registry[character_id] = _new_character(
                     character_id,
@@ -1034,141 +1390,199 @@ def resolve_scene_characters(
 
                 match = IdentityMatch(
                     character_id=character_id,
-                    visual_score=0.0,
-                    voice_score=0.0,
-                    temporal_score=0.0,
-                    context_score=0.0,
-                    identity_score=0.0,
-                    status="AMBÍGUO",
+                    visual_score=1.0,
+                    voice_score=0.5,
+                    temporal_score=0.5,
+                    context_score=0.5,
+                    identity_score=0.5,
+                    status="PROVÁVEL",
+                    margin=1.0,
+                    candidate_character_ids=[character_id],
                 )
 
-            _merge_character_evidence(
-                registry[character_id],
-                normalized,
-                scene_index,
-                match,
-            )
+            # ---------------------------------------------------------------
+            # 5. Se ainda não temos identidade:
+            #    manter AMBÍGUO sem criar personagem artificial.
+            # ---------------------------------------------------------------
 
-            resolved_character = {
+            if character_id is not None:
+
+                registry_item = registry.get(character_id)
+
+                if registry_item is None:
+                    registry_item = _new_character(
+                        character_id,
+                        normalized,
+                        scene_index,
+                    )
+
+                    registry[character_id] = registry_item
+
+                _merge_character_evidence(
+                    registry_item,
+                    normalized,
+                    scene_index,
+                    visual_confidence=(match.visual_score if match else None),
+                    identity_confidence=(match.identity_score if match else None),
+                    identity_status=(match.status if match else "PROVÁVEL"),
+                )
+
+            # ---------------------------------------------------------------
+            # 6. Resultado da cena
+            # ---------------------------------------------------------------
+
+            result = {
                 "scene_character_ref": normalized.get("character_ref"),
                 "character_id": character_id,
-                "name": registry[character_id].get("name"),
-                "status": match.status,
-                "identity_confidence": round(
-                    match.identity_score,
-                    4,
+                "name": (
+                    registry.get(
+                        character_id,
+                        {},
+                    ).get("name")
+                    if character_id
+                    else normalized.get("name")
                 ),
-                "visual_score": round(
-                    match.visual_score,
-                    4,
+                "status": (match.status if match else "AMBÍGUO"),
+                "identity_confidence": (
+                    round(
+                        match.identity_score,
+                        4,
+                    )
+                    if match
+                    else 0.0
                 ),
-                "voice_score": round(
-                    match.voice_score,
-                    4,
+                "identity_margin": (
+                    round(
+                        match.margin,
+                        4,
+                    )
+                    if match
+                    else 0.0
                 ),
-                "temporal_score": round(
-                    match.temporal_score,
-                    4,
+                "visual_score": (
+                    round(
+                        match.visual_score,
+                        4,
+                    )
+                    if match
+                    else 0.0
                 ),
-                "context_score": round(
-                    match.context_score,
-                    4,
+                "voice_score": (
+                    round(
+                        match.voice_score,
+                        4,
+                    )
+                    if match
+                    else 0.0
                 ),
-                "speaker_id": speaker,
+                "temporal_score": (
+                    round(
+                        match.temporal_score,
+                        4,
+                    )
+                    if match
+                    else 0.0
+                ),
+                "context_score": (
+                    round(
+                        match.context_score,
+                        4,
+                    )
+                    if match
+                    else 0.0
+                ),
+                "speaker_ids": speaker_ids,
+                "speaker_associations": normalized.get(
+                    "speaker_associations",
+                    [],
+                ),
+                "voice_evidence": voice_evidence,
+                "candidate_character_ids": (
+                    match.candidate_character_ids if match else []
+                ),
             }
 
-            scene_resolved.append(resolved_character)
+            scene_resolved.append(result)
 
-        scene_copy["resolved_characters"] = scene_resolved
+            # ---------------------------------------------------------------
+            # Speaker -> Character
+            # ---------------------------------------------------------------
 
-        # Mapeamento rápido speaker -> character
-        speaker_mapping = {}
+            if character_id:
 
-        for item in scene_resolved:
-            speaker_id = item.get("speaker_id")
+                for speaker_id in speaker_ids:
+                    speaker_mapping[speaker_id] = {
+                        "character_id": character_id,
+                        "character_name": registry[character_id].get("name"),
+                        "status": (match.status if match else "AMBÍGUO"),
+                        "confidence": (match.identity_score if match else 0.0),
+                    }
 
-            character_id = item.get("character_id")
+        resolved_scenes.append(
+            {
+                "scene_id": scene.get(
+                    "scene_id",
+                    scene_index,
+                ),
+                "start": scene.get("start"),
+                "end": scene.get("end"),
+                "resolved_characters": scene_resolved,
+                "speaker_character_mapping": speaker_mapping,
+            }
+        )
 
-            if speaker_id and character_id:
-                speaker_mapping[speaker_id] = character_id
+    return resolved_scenes, registry
 
-        scene_copy["speaker_character_mapping"] = speaker_mapping
 
-        resolved_scenes.append(scene_copy)
-
-    return (
-        resolved_scenes,
-        registry,
-    )
+# ---------------------------------------------------------------------------
+# Formatação
+# ---------------------------------------------------------------------------
 
 
 def format_character_registry(
-    registry: dict[str, Any],
+    registry: dict[str, dict[str, Any]],
 ) -> str:
-    """
-    Formata a registry estruturada em texto humano-legível.
-    """
 
-    blocks = []
+    lines = []
 
-    for character_id, character in registry.items():
-        stable = character.get(
-            "stable_appearance",
-            {},
+    for character_id, character in sorted(registry.items()):
+        name = character.get("name") or "NÃO IDENTIFICADO"
+
+        status = character.get(
+            "identity_status",
+            "AMBÍGUO",
         )
 
-        temporary = character.get(
-            "temporary_appearance",
-            {},
-        )
+        confidence = character.get("identity_confidence")
 
-        features = character.get(
-            "distinctive_features",
-            [],
-        )
-
-        name = character.get("name") or "UNNAMED"
-
-        blocks.append(
-            "\n".join(
-                [
-                    f"CHARACTER_ID: {character_id}",
-                    f"NAME: {name}",
-                    (
-                        "SPEAKER_IDS: "
-                        + ", ".join(
-                            map(
-                                str,
-                                character.get(
-                                    "speaker_ids",
-                                    [],
-                                ),
-                            )
-                        )
-                    ),
-                    ("STABLE_APPEARANCE: " + str(stable)),
-                    ("TEMPORARY_APPEARANCE: " + str(temporary)),
-                    ("DISTINCTIVE_FEATURES: " + str(features)),
-                    ("VISUAL_CONFIDENCE: " + str(character.get("visual_confidence"))),
-                    ("VOICE_CONFIDENCE: " + str(character.get("voice_confidence"))),
-                    (
-                        "IDENTITY_CONFIDENCE: "
-                        + str(character.get("identity_confidence"))
-                    ),
-                    (
-                        "SCENES: "
-                        + ", ".join(
-                            map(
-                                str,
-                                character.get(
-                                    "scenes",
-                                    [],
-                                ),
-                            )
-                        )
-                    ),
-                ]
+        speakers = (
+            ", ".join(
+                character.get(
+                    "speaker_ids",
+                    [],
+                )
             )
+            or "nenhum"
         )
 
-    return "\n\n---\n\n".join(blocks)
+        scenes = (
+            ", ".join(
+                str(scene)
+                for scene in character.get(
+                    "scenes",
+                    [],
+                )
+            )
+            or "nenhuma"
+        )
+
+        lines.append(
+            f"{character_id} | "
+            f"{name} | "
+            f"{status} | "
+            f"confiança={confidence} | "
+            f"speakers={speakers} | "
+            f"cenas={scenes}"
+        )
+
+    return "\n".join(lines)

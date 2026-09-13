@@ -3,23 +3,40 @@
 from __future__ import annotations
 
 from typing import Any
+
 import json
 import re
 
 import torch
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+from transformers import (
+    AutoProcessor,
+    Qwen2_5_VLForConditionalGeneration,
+)
+
 from qwen_vl_utils import process_vision_info
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
 
 
 def _load_model(config: dict[str, Any]):
-    scene_cfg = config.get("scene_analysis", {})
+
+    scene_cfg = config.get(
+        "scene_analysis",
+        {},
+    )
 
     model_name = scene_cfg.get(
         "model",
         "Qwen/Qwen2.5-VL-7B-Instruct",
     )
 
-    load_in_4bit = scene_cfg.get("load_in_4bit", False)
+    load_in_4bit = scene_cfg.get(
+        "load_in_4bit",
+        False,
+    )
 
     kwargs = {
         "torch_dtype": torch.bfloat16,
@@ -42,40 +59,168 @@ def _load_model(config: dict[str, Any]):
     return model, processor
 
 
-def _build_prompt(scene: dict[str, Any]) -> str:
-    dialogue = scene.get("dialogue", "").strip()
-    visual = scene.get("description", "").strip()
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+
+def _build_prompt(
+    scene: dict[str, Any],
+) -> str:
+
+    dialogue = scene.get(
+        "dialogue",
+        "",
+    )
+
+    if isinstance(dialogue, list):
+        dialogue = json.dumps(
+            dialogue,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    dialogue = str(dialogue).strip()
+
+    visual = str(
+        scene.get(
+            "description",
+            scene.get(
+                "context",
+                "",
+            ),
+        )
+        or ""
+    ).strip()
+
+    resolved_characters = scene.get(
+        "resolved_characters",
+        [],
+    )
+
+    speaker_mapping = scene.get(
+        "speaker_character_mapping",
+        {},
+    )
+
+    character_registry = scene.get(
+        "character_registry",
+        {},
+    )
+
+    scene_events = scene.get(
+        "scene_events",
+        {},
+    )
 
     return f"""
-Você está analisando uma cena de um filme ou anime.
+Você está analisando uma cena de um filme, anime ou episódio.
 
-Sua tarefa é produzir uma descrição audiovisual objetiva da cena,
-combinando o diálogo transcrito e o que pode ser observado visualmente.
+Esta etapa NÃO é responsável por identificar personagens.
 
-DIÁLOGO:
+A identidade global dos personagens já foi resolvida por um sistema
+externo.
+
+Você deve PRESERVAR as identidades fornecidas.
+
+Não altere:
+
+- speaker_id;
+- character_id;
+- character_name.
+
+Não crie novos personagens.
+
+Não reidentifique personagens.
+
+Não use conhecimento externo sobre filmes, animes ou franquias.
+
+Não tente adivinhar nomes.
+
+Não associe um personagem a outro apenas porque a aparência temporária
+é semelhante.
+
+ROUPA E ACESSÓRIOS NÃO SÃO PROVA SUFICIENTE DE IDENTIDADE.
+
+Quando um personagem estiver como AMBÍGUO, mantenha a ambiguidade.
+
+==================================================
+IDENTIDADES RESOLVIDAS
+==================================================
+
+{json.dumps(
+    resolved_characters,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+==================================================
+SPEAKER -> CHARACTER
+==================================================
+
+{json.dumps(
+    speaker_mapping,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+==================================================
+REGISTRO GLOBAL
+==================================================
+
+{json.dumps(
+    character_registry,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+==================================================
+EVENTOS ESTRUTURADOS
+==================================================
+
+{json.dumps(
+    scene_events,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+==================================================
+DIÁLOGO
+==================================================
+
 {dialogue}
 
-DESCRIÇÃO VISUAL PRÉVIA:
+==================================================
+DESCRIÇÃO VISUAL PRÉVIA
+==================================================
+
 {visual}
+
+==================================================
+TAREFA
+==================================================
+
+Produza uma descrição audiovisual objetiva da cena.
 
 Descreva somente informações sustentadas pelo diálogo ou pelas imagens.
 
-A descrição deve registrar:
+Registre:
 
 - contexto da cena;
 - personagens presentes;
-- ambiente/local quando for relevante;
-- ações físicas realizadas pelos personagens;
-- objetos importantes e interações com eles;
-- acontecimentos relevantes;
+- ambiente/local;
+- ações físicas;
+- objetos importantes;
+- interações;
+- acontecimentos;
 - falas importantes;
-- mudanças relevantes durante a cena;
-- estado ou emoção APARENTE dos personagens quando puder ser inferido
-  visualmente ou pelo diálogo.
+- mudanças relevantes;
+- estado ou emoção aparentemente observável.
 
 Dê prioridade a acontecimentos concretos.
 
 Exemplos:
+
 - personagem pega um objeto;
 - personagem abre uma porta;
 - personagem corre;
@@ -88,21 +233,45 @@ Exemplos:
 - um objeto é destruído.
 
 Não invente acontecimentos.
-Não invente nomes de personagens.
-Não deduza acontecimentos que não possam ser sustentados pelo vídeo
-ou pelo diálogo.
-Não repita informações sem necessidade.
 
-Retorne exatamente neste formato:
+Não invente nomes.
+
+Não invente diálogos.
+
+Não atribua ações a outro personagem.
+
+Use as identidades fornecidas pelo sistema externo.
+
+Se o registro disser:
+
+character_id = character_001
+character_name = Cell
+
+então não transforme esse personagem em outro personagem.
+
+Se o registro disser:
+
+character_id = character_001
+character_name = null
+
+não invente um nome.
+
+Se o registro disser:
+
+status = AMBÍGUO
+
+não tente resolver a identidade.
+
+Retorne exatamente:
 
 CONTEXTO
-<descrição breve da situação da cena>
+<descrição breve da situação>
 
 PERSONAGENS
-- <personagem>: <ação/estado relevante>
+- <character_name ou identificador neutro>: <ação/estado>
 
 AMBIENTE
-<descrição do ambiente, somente se relevante>
+<ambiente relevante>
 
 ACONTECIMENTOS
 - <acontecimento>
@@ -113,14 +282,20 @@ AÇÕES
 - <ação>
 
 FALAS IMPORTANTES
-- <personagem>: <fala ou resumo da fala>
+- <personagem>: <fala ou resumo>
 
 ESTADO / EMOÇÕES OBSERVÁVEIS
-- <personagem>: <estado ou emoção aparente>
+- <personagem>: <estado>
 
-Se uma seção não tiver informação suficiente, escreva:
+Se uma seção não tiver informação suficiente:
+
 Não identificado.
 """.strip()
+
+
+# ---------------------------------------------------------------------------
+# Scene analysis
+# ---------------------------------------------------------------------------
 
 
 def _analyze_scene(
@@ -178,12 +353,19 @@ def _analyze_scene(
         for key, value in inputs.items()
     }
 
-    scene_cfg = config.get("scene_analysis", {})
+    scene_cfg = config.get(
+        "scene_analysis",
+        {},
+    )
 
     with torch.inference_mode():
+
         generated_ids = model.generate(
             **inputs,
-            max_new_tokens=scene_cfg.get("context_max_new_tokens", 500),
+            max_new_tokens=scene_cfg.get(
+                "context_max_new_tokens",
+                500,
+            ),
             repetition_penalty=scene_cfg.get(
                 "repetition_penalty",
                 1.15,
@@ -208,7 +390,10 @@ def _analyze_scene(
     return _clean_result(result)
 
 
-def _clean_result(text: str) -> str:
+def _clean_result(
+    text: str,
+) -> str:
+
     text = text.strip()
 
     text = re.sub(
@@ -218,6 +403,11 @@ def _clean_result(text: str) -> str:
     )
 
     return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def analyze_scenes(
@@ -234,18 +424,49 @@ def analyze_scenes(
     results = []
 
     try:
+
         for index, scene in enumerate(scenes):
 
-            frames = frames_by_scene.get(index, [])
+            frames = frames_by_scene.get(
+                index,
+                [],
+            )
 
             if not frames:
+
                 results.append(
                     {
+                        **scene,
+                        "scene_id": scene.get(
+                            "scene_id",
+                            index,
+                        ),
                         "start": scene.get("start"),
                         "end": scene.get("end"),
-                        "context": "Não foi possível analisar visualmente esta cena.",
+                        "context": (
+                            "Não foi possível " "analisar visualmente " "esta cena."
+                        ),
+                        "resolved_characters": (
+                            scene.get(
+                                "resolved_characters",
+                                [],
+                            )
+                        ),
+                        "speaker_character_mapping": (
+                            scene.get(
+                                "speaker_character_mapping",
+                                {},
+                            )
+                        ),
+                        "character_registry": (
+                            scene.get(
+                                "character_registry",
+                                {},
+                            )
+                        ),
                     }
                 )
+
                 continue
 
             context = _analyze_scene(
@@ -258,6 +479,11 @@ def analyze_scenes(
 
             results.append(
                 {
+                    **scene,
+                    "scene_id": scene.get(
+                        "scene_id",
+                        index,
+                    ),
                     "start": scene.get("start"),
                     "end": scene.get("end"),
                     "context": context,
@@ -265,6 +491,7 @@ def analyze_scenes(
             )
 
     finally:
+
         del model
         del processor
 
@@ -274,12 +501,22 @@ def analyze_scenes(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Save
+# ---------------------------------------------------------------------------
+
+
 def save_context(
     contexts: list[dict[str, Any]],
     path: str,
 ) -> None:
 
-    with open(path, "w", encoding="utf-8") as file:
+    with open(
+        path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+
         json.dump(
             contexts,
             file,
@@ -288,28 +525,66 @@ def save_context(
         )
 
 
+# ---------------------------------------------------------------------------
+# Full analysis
+# ---------------------------------------------------------------------------
+
+
 def _format_scenes_text(
     contexts: list[dict[str, Any]],
 ) -> str:
 
     scenes_text = []
 
-    for index, context in enumerate(contexts, start=1):
+    for index, context in enumerate(
+        contexts,
+        start=1,
+    ):
 
         dialogue = context.get(
             "dialogue",
             "",
-        ).strip()
+        )
+
+        if isinstance(dialogue, list):
+            dialogue = json.dumps(
+                dialogue,
+                ensure_ascii=False,
+            )
 
         visual = context.get(
             "context",
             "",
-        ).strip()
+        )
+
+        resolved = context.get(
+            "resolved_characters",
+            [],
+        )
+
+        mapping = context.get(
+            "speaker_character_mapping",
+            {},
+        )
 
         scenes_text.append(f"""
 SCENE {index}
 START: {context.get("start")}
 END: {context.get("end")}
+
+RESOLVED CHARACTERS:
+{json.dumps(
+    resolved,
+    ensure_ascii=False,
+    indent=2,
+)}
+
+SPEAKER -> CHARACTER:
+{json.dumps(
+    mapping,
+    ensure_ascii=False,
+    indent=2,
+)}
 
 DIALOGUE:
 {dialogue}
@@ -328,117 +603,96 @@ def _build_full_analysis_prompt(
     scenes_text = _format_scenes_text(contexts)
 
     return f"""
-You are analyzing a complete movie, anime episode, TV episode, or other
-long-form video.
+Você está consolidando a análise completa de um vídeo.
 
-Below are the individual analyses of the scenes that were already processed.
+As identidades dos personagens já foram resolvidas anteriormente.
 
-Your task is to consolidate these scene analyses into one objective,
-chronological audiovisual analysis of the entire video.
+NÃO tente resolver novamente as identidades.
 
-Use ONLY information supported by the provided scene analyses and dialogue.
+Use:
 
-The goal is to describe what happens throughout the video, not to invent
-a deeper interpretation of the story.
+- character_id;
+- character_name;
+- speaker_id;
 
-Prioritize:
+exatamente como fornecidos.
 
-- the main characters and their participation;
-- relevant locations and environments;
-- important physical actions;
-- interactions between characters;
-- interactions with objects;
-- important events;
-- changes in the situation;
-- attacks, fights, falls, explosions, destruction, entrances, exits,
-  movements, and other concrete events;
-- important dialogue;
-- observable or explicitly supported emotional states;
-- the chronological sequence of events.
+Não troque personagens.
 
-Preserve the order in which events occur.
+Não crie personagens.
 
-Do NOT invent events.
+Não invente nomes.
 
-Do NOT invent character names.
+Não use conhecimento externo.
 
-Only use a character's name if that exact name appears verbatim in the
-DIALOGUE sections of the scene analyses above. Do not use outside
-knowledge of any movie, show, or franchise to identify or correct a
-character's name, even if you recognize who they might be.
+Não corrija nomes com base em conhecimento da franquia.
 
-If a character is not named in the dialogue, refer to them using a
-neutral, consistent label instead (e.g. "the man", "the character with
-spiky hair", "the taller character"). Use the SAME label for the same
-character across the whole analysis — do not switch labels or spellings
-partway through.
+Preserve ambiguidades.
 
-Do NOT invent dialogue.
+Use somente informações sustentadas pelas cenas.
 
-Do NOT attribute motivations, intentions, symbolism, themes, or psychological
-states unless they are explicitly supported by the provided information.
+Priorize:
 
-Prefer concrete descriptions.
+- personagens;
+- locais;
+- ações;
+- interações;
+- eventos;
+- objetos;
+- falas;
+- mudanças;
+- sequência cronológica.
 
-For example:
+Não invente:
 
-"Cell steps on Android 17's head."
+- eventos;
+- motivações;
+- intenções;
+- diálogos;
+- nomes;
+- relações entre personagens.
 
-is preferable to:
-
-"Cell steps on Android 17's head to demonstrate his superiority."
-
-Only report the second interpretation if it is explicitly supported.
-
-Do not merge unrelated events simply because they involve the same character.
-
-Do not repeat the same event unnecessarily.
-
-SCENE ANALYSES:
+CENAS:
 
 {scenes_text}
 
-Return the final analysis exactly in this structure:
+Retorne exatamente:
 
 GENERAL CONTEXT
 
-<brief objective description of the overall situation>
+<descrição objetiva>
 
 CHARACTERS
 
-- <character>: <role, participation, and relevant actions>
+- <personagem>: <participação>
 
 ENVIRONMENTS
 
-- <location/environment>: <relevant events or changes>
+- <local>: <eventos relevantes>
 
 SEQUENCE OF EVENTS
 
-- <event in chronological order>
-- <event in chronological order>
-- <event in chronological order>
+- <evento>
+- <evento>
+- <evento>
 
 IMPORTANT ACTIONS
 
-- <important physical action>
-- <important physical action>
+- <ação>
+- <ação>
 
 IMPORTANT DIALOGUE
 
-- <character>: <important line or concise summary>
-- <character>: <important line or concise summary>
+- <personagem>: <fala ou resumo>
+- <personagem>: <fala ou resumo>
 
 OBSERVABLE STATES / EMOTIONS
 
-- <character>: <observable or clearly supported state>
+- <personagem>: <estado>
 
 SUMMARY
 
-<objective summary of the entire video>
-
-If a section does not contain enough information, write:
-
-Not identified.
+<resumo objetivo>
 """.strip()
 
 
@@ -448,11 +702,12 @@ def analyze_full_context(
 ) -> str:
 
     if not contexts:
-        return "Não foi possível gerar a análise: nenhuma cena foi processada."
+        return "Não foi possível gerar a análise: " "nenhuma cena foi processada."
 
     model, processor = _load_model(config)
 
     try:
+
         prompt = _build_full_analysis_prompt(contexts)
 
         messages = [
@@ -484,7 +739,10 @@ def analyze_full_context(
             for key, value in inputs.items()
         }
 
-        scene_cfg = config.get("scene_analysis", {})
+        scene_cfg = config.get(
+            "scene_analysis",
+            {},
+        )
 
         with torch.inference_mode():
 
@@ -518,6 +776,7 @@ def analyze_full_context(
         return _clean_result(result)
 
     finally:
+
         del model
         del processor
 
@@ -539,6 +798,11 @@ def save_analysis(
         file.write(analysis.strip() + "\n")
 
 
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
 def _build_validation_prompt(
     draft_analysis: str,
     contexts: list[dict[str, Any]],
@@ -547,52 +811,46 @@ def _build_validation_prompt(
     scenes_text = _format_scenes_text(contexts)
 
     return f"""
-You previously wrote the following consolidated analysis of a video,
-based on individual scene analyses and dialogue.
+Você deve validar uma análise consolidada de vídeo.
 
-DRAFT ANALYSIS:
+ANÁLISE:
 
 {draft_analysis}
 
-Below are the ORIGINAL scene-by-scene analyses and dialogue that this
-draft was supposed to be based on. Treat this as the only source of
-truth — anything in the draft that isn't supported here is an error.
+FONTE ORIGINAL:
 
 {scenes_text}
 
-Carefully review the draft against the original scene analyses and
-dialogue above. Check specifically for:
+Corrija somente erros verificáveis.
 
-- events, objects, or details in the draft that are NOT supported by
-  the scene analyses or dialogue;
-- character NAME SPELLING errors or inconsistent spelling of the same
-  character across the document (e.g. the same character being called
-  by two different or misspelled names in different sections) — pick
-  ONE correct, consistent spelling for each character and use it
-  throughout the entire document;
-- specific numeric or identifying labels (e.g. "Android 7", "Android
-  8") that do NOT appear verbatim in the scene analyses or dialogue
-  above — if the exact label isn't present in the source, replace it
-  with a neutral description instead of guessing a number;
-- actions or dialogue attributed to the wrong character;
-- events placed in the wrong chronological order;
-- grammar, spelling, punctuation, or phrasing errors — including
-  broken/garbled words (e.g. "terraines", "saiyn", "Goham's");
-- interpretations of motivation, symbolism, or psychological state
-  that go beyond what is explicitly supported;
-- unnecessary repetition of the same event or information.
+Verifique:
 
-Correct every issue you find. Do not introduce any new information
-that isn't supported by the scene analyses or dialogue above — when in
-doubt, remove the unsupported claim or use a neutral description
-rather than guessing.
+- eventos inventados;
+- personagens trocados;
+- nomes incorretos;
+- nomes inconsistentes;
+- speaker_id atribuído incorretamente;
+- character_id atribuído incorretamente;
+- ações atribuídas ao personagem errado;
+- ordem cronológica;
+- falas inventadas;
+- detalhes inexistentes;
+- repetições;
+- erros gramaticais.
 
-If the draft is already fully accurate, return it unchanged.
+IMPORTANTE:
 
-Return ONLY the corrected analysis, using EXACTLY the same section
-structure as the draft (same headers, same order, plain text — no
-markdown symbols like ### or **). Do not explain what you changed or
-add any commentary outside the analysis itself.
+Não tente reidentificar personagens.
+
+Respeite os character_id e character_name fornecidos.
+
+Não use conhecimento externo.
+
+Não invente nomes.
+
+Se uma identidade estiver ambígua, preserve a ambiguidade.
+
+Retorne somente a análise corrigida.
 """.strip()
 
 
@@ -601,19 +859,18 @@ def validate_analysis(
     contexts: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> str:
-    """
-    Segunda passada sobre a análise consolidada: confere o rascunho
-    contra as análises de cena originais (a fonte confiável, ancorada
-    em frames + diálogo) e corrige inconsistências — nomes trocados,
-    eventos mal atribuídos, alucinação, erros de escrita.
-    """
+
     if not draft_analysis or not contexts:
         return draft_analysis
 
     model, processor = _load_model(config)
 
     try:
-        prompt = _build_validation_prompt(draft_analysis, contexts)
+
+        prompt = _build_validation_prompt(
+            draft_analysis,
+            contexts,
+        )
 
         messages = [
             {
@@ -644,7 +901,10 @@ def validate_analysis(
             for key, value in inputs.items()
         }
 
-        scene_cfg = config.get("scene_analysis", {})
+        scene_cfg = config.get(
+            "scene_analysis",
+            {},
+        )
 
         with torch.inference_mode():
 
@@ -652,7 +912,7 @@ def validate_analysis(
                 **inputs,
                 max_new_tokens=scene_cfg.get(
                     "validation_max_new_tokens",
-                    1200,
+                    1000,
                 ),
                 repetition_penalty=scene_cfg.get(
                     "repetition_penalty",
@@ -661,7 +921,7 @@ def validate_analysis(
                 do_sample=False,
             )
 
-        generated_ids_trimmed = [
+        trimmed = [
             output_ids[len(input_ids) :]
             for input_ids, output_ids in zip(
                 inputs["input_ids"],
@@ -670,17 +930,17 @@ def validate_analysis(
         ]
 
         result = processor.batch_decode(
-            generated_ids_trimmed,
+            trimmed,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0]
 
-        revised = _clean_result(result)
+        result = _clean_result(result)
 
-        # segurança: se a revisão vier vazia por algum motivo, mantém o rascunho
-        return revised if revised.strip() else draft_analysis
+        return result or draft_analysis
 
     finally:
+
         del model
         del processor
 
