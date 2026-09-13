@@ -4,24 +4,124 @@ whisper:
   device: "cuda"
   compute_type: "float16"
 
-diarization:
 
+# ============================================================
+# DIARIZAÇÃO
+# ============================================================
+
+diarization:
   hf_token: ""
+
+  # Se você souber quantos personagens/falantes existem,
+  # configure os dois.
+  #
+  # Exemplo:
+  #
+  # min_speakers: 2
+  # max_speakers: 2
+
   min_speakers: null
   max_speakers: null
 
+
+# ============================================================
+# IDENTIFICAÇÃO POR VOZ
+# ============================================================
+
 speaker_mapping:
+
+  # Similaridade mínima para considerar um candidato.
   similarity_threshold: 0.75
+
+  # Diferença mínima entre o melhor e o segundo candidato.
+  #
+  # Exemplo:
+  #
+  # Goku   = 0.81
+  # Vegeta = 0.79
+  #
+  # margem = 0.02
+  #
+  # Como 0.02 < 0.08:
+  #
+  # AMBÍGUO
+  #
+  margin_threshold: 0.08
+
   voice_profiles_dir: "models/voice_profiles"
 
-scene_analysis:
-  enabled: true
-  mode: "cena"
 
+# ============================================================
+# RESOLUÇÃO GLOBAL DE IDENTIDADE
+# ============================================================
+
+identity_resolution:
+
+  enabled: true
+
+  # Pesos iniciais.
+  #
+  # Esses valores devem ser calibrados posteriormente com
+  # exemplos reais do seu dataset.
+
+  visual_weight: 0.40
+  voice_weight: 0.35
+  temporal_weight: 0.15
+  context_weight: 0.10
+
+  # Score final mínimo.
+
+  confirmed_threshold: 0.80
+  probable_threshold: 0.65
+
+  # Margem entre o melhor candidato e o segundo candidato.
+
+  confirmed_margin: 0.10
+  probable_margin: 0.05
+
+  # ----------------------------------------------------------
+  # PESOS VISUAIS
+  # ----------------------------------------------------------
+
+  visual:
+
+    # Características estáveis são mais importantes.
+    stable_weight: 0.90
+
+    # Roupa/acessórios podem mudar.
+    temporary_weight: 0.10
+
+    features:
+
+      distinctive_features: 0.25
+
+      hair: 0.20
+
+      face: 0.20
+
+      body: 0.15
+
+      skin: 0.10
+
+      clothing: 0.07
+
+      accessories: 0.03
+
+
+# ============================================================
+# ANÁLISE VISUAL
+# ============================================================
+
+scene_analysis:
+
+  enabled: true
+
+  mode: "cena"
 
   frames_per_scene: 12
 
   gap_threshold_seconds: 3.0
+
   padding_seconds: 0.5
 
   load_in_4bit: false
@@ -32,26 +132,38 @@ scene_analysis:
 
   max_new_tokens: 400
 
-  validation_max_new_tokens: 1200   # etapa de revisão da análise final (documento inteiro, precisa de mais espaço)
+  validation_max_new_tokens: 1200
 
-  # Consistência de personagens entre cenas: monta uma ficha por
-  # personagem (juntando todas as cenas) e reescreve cada cena usando
-  # nomes/rótulos consistentes - só texto, sem reprocessar frames.
+  # ----------------------------------------------------------
+  # CONSISTÊNCIA
+  # ----------------------------------------------------------
+
   enable_character_consistency: true
-  character_sheet_max_new_tokens: 800   # ficha consolidada (documento com todos os personagens)
-  consistency_max_new_tokens: 300       # reescrita de UMA cena por vez
+
+  character_sheet_max_new_tokens: 800
+
+  consistency_max_new_tokens: 300
+
+  context_max_new_tokens: 1000
 
   repetition_penalty: 1.15
-  # no_repeat_ngram_size bane qualquer sequência de N tokens repetida em
-  # TODA a entrada (incluindo o prompt) — em prompts longos e repetitivos
-  # (diálogo com o mesmo nome de personagem várias vezes, blocos de cena
-  # repetidos) isso pode corromper a grafia de nomes e cabeçalhos. Deixe
-  # null (desligado) a menos que veja loops de repetição real no texto
-  # gerado; nesse caso use um valor alto (8+), nunca 2 ou 3.
+
   no_repeat_ngram_size: null
+
   do_sample: false
 
   question: ""
+
+
+# ============================================================
+# OUTPUT
+# ============================================================
+
 output:
-  formats: ["txt", "json", "srt"]
+
+  formats:
+    - "txt"
+    - "json"
+    - "srt"
+
   output_dir: "resultados"
