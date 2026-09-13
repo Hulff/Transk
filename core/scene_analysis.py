@@ -97,7 +97,7 @@ def _extract_frame_at(
         )
 
 
-DEFAULT_QUESTION = """
+LEGACY_QUESTION = """
 You are analyzing a scene from a movie, anime, TV episode, or other video.
 
 Your task is to produce an objective audiovisual description of the entire
@@ -215,9 +215,112 @@ Not identified.
 """.strip()
 
 
+# ---------------------------------------------------------------------
+# Fase 1 (V2) — descritores visuais estruturados
+#
+# Em vez de só um texto livre, o modelo retorna três blocos marcados:
+#   CHARACTERS_JSON     - lista de personagens com aparência estruturada
+#                          (estável vs temporária), pra permitir matching
+#                          entre cenas mais pra frente (Fase 3)
+#   SCENE_EVENTS_JSON   - quem aparece/entra/sai, ações, objetos, mudanças
+#   SUMMARY             - um resumo em texto corrido (mantém compatibilidade
+#                          com o roteiro final e a síntese, que continuam
+#                          consumindo texto simples)
+#
+# "indeterminado" é usado no lugar de qualquer característica que não
+# possa ser confirmada visualmente — nunca se preenche por chute.
+# ---------------------------------------------------------------------
+
+DEFAULT_QUESTION = """
+You are a visual analyst of audiovisual scenes.
+
+Analyze ALL the provided frames TOGETHER as a single scene. Do not treat
+each frame as an independent image.
+
+Your goal is to identify and describe the characters visually present, and
+record characteristics that could later be used to recognize the same
+character in other scenes.
+
+IMPORTANT RULES:
+
+1. Describe only characteristics that are visually observable in the frames.
+2. Never invent characteristics that are not visible.
+3. If a characteristic cannot be determined, use "indeterminado".
+4. Do not use outside knowledge about the movie, anime, series, or characters
+   to figure out names.
+5. Do not assign a name to a character just because their appearance
+   resembles a known character.
+6. A name should only be used if it is explicitly established by the
+   dialogue below.
+7. Distinguish stable characteristics (hair, face shape, skin tone, build,
+   distinctive features) from temporary characteristics (clothing,
+   accessories, injuries, dirt, items carried).
+8. A change of clothing does not necessarily mean a change of character.
+9. Consider all frames together to identify persistent characteristics.
+10. If two characters look visually similar, carefully record the
+    characteristics that allow telling them apart.
+11. Do not turn visual characteristics into inferences about race,
+    ethnicity, personality, or other non-observable traits.
+12. Do not confuse a temporary characteristic with a permanent physical one.
+13. When there is little visual evidence, prefer "indeterminado" over a
+    speculative statement.
+
+The dialogue spoken during this scene is (context only — do not assume
+something happened visually just because the dialogue says so):
+
+{dialogue}
+
+Return your answer in EXACTLY this format, with these three marked blocks
+and nothing else outside them:
+
+CHARACTERS_JSON:
+<a JSON array, one object per visually identifiable character, in this shape:
+[
+  {{
+    "character_ref": "personagem_A",
+    "name": "<exact name ONLY if it appears in the dialogue above, else null>",
+    "stable_appearance": {{
+      "skin_tone": "<or indeterminado>",
+      "hair_color": "<or indeterminado>",
+      "hair_length": "<or indeterminado>",
+      "hair_style": "<or indeterminado>",
+      "face_shape": "<or indeterminado>",
+      "facial_hair": "<or indeterminado>",
+      "build": "<or indeterminado>",
+      "distinctive_features": ["<visible distinctive trait>", "..."]
+    }},
+    "temporary_appearance": {{
+      "clothing": ["<visible clothing item>", "..."],
+      "accessories": ["<visible accessory>", "..."],
+      "temporary_features": ["<e.g. injury, dirt, item carried>", "..."]
+    }}
+  }}
+]
+Use an empty array [] if no character is clearly identifiable.>
+
+SCENE_EVENTS_JSON:
+<a JSON object in this shape:
+{{
+  "characters_present": ["personagem_A", "personagem_B"],
+  "enters_or_exits": ["<e.g. personagem_A enters the room>"],
+  "actions": ["<physical action performed by a character>"],
+  "objects_used": ["<object and who uses it>"],
+  "visual_changes": ["<relevant change during the scene>"]
+}}
+Use empty arrays if nothing applicable.>
+
+SUMMARY:
+<a short, objective paragraph in {language}, describing what happens in
+the scene in plain language for a human-readable script. Follow the same
+grounding rules above: no invented names, no invented events, use neutral
+labels when names are unknown. This paragraph will be used on its own, so
+it must make sense without the JSON blocks above.>
+""".strip()
+
 def _load_qwen_model(
     model_name: str,
     load_in_4bit: bool = False,
+    attn_implementation: str = "sdpa",
 ):
     import torch
     from transformers import (
@@ -230,6 +333,9 @@ def _load_qwen_model(
     kwargs = {
         "torch_dtype": torch.bfloat16,
         "device_map": "auto",
+        # "sdpa" funciona em CUDA e ROCm sem depender do pacote
+        # flash-attn (que não tem build pra ROCm).
+        "attn_implementation": attn_implementation,
     }
 
     if load_in_4bit:
@@ -251,6 +357,76 @@ def _load_qwen_model(
     processor = AutoProcessor.from_pretrained(model_name)
 
     return model, processor
+
+
+import json
+import re
+
+
+def _extract_json_block(raw: str, start_marker: str, end_marker: str | None) -> str | None:
+    """Extrai o texto entre dois marcadores (ou até o fim, se end_marker não aparecer)."""
+    start_idx = raw.find(start_marker)
+    if start_idx == -1:
+        return None
+    start_idx += len(start_marker)
+
+    if end_marker:
+        end_idx = raw.find(end_marker, start_idx)
+        if end_idx == -1:
+            return raw[start_idx:].strip()
+        return raw[start_idx:end_idx].strip()
+
+    return raw[start_idx:].strip()
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove ```json ... ``` ou ``` ... ``` se o modelo envolver o JSON em fence."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"```$", "", text)
+    return text.strip()
+
+
+def parse_structured_response(raw: str) -> tuple[list[dict], dict, str]:
+    """
+    Faz o parsing da resposta em três blocos (CHARACTERS_JSON,
+    SCENE_EVENTS_JSON, SUMMARY). Tolerante a falhas: se o JSON vier
+    malformado ou os marcadores não aparecerem, cai de volta pro texto
+    bruto como resumo, sem derrubar o pipeline.
+
+    Retorna (characters, scene_events, summary).
+    """
+    characters: list[dict] = []
+    scene_events: dict = {}
+    summary = raw.strip()
+
+    chars_block = _extract_json_block(raw, "CHARACTERS_JSON:", "SCENE_EVENTS_JSON:")
+    events_block = _extract_json_block(raw, "SCENE_EVENTS_JSON:", "SUMMARY:")
+    summary_block = _extract_json_block(raw, "SUMMARY:", None)
+
+    if chars_block:
+        try:
+            characters = json.loads(_strip_code_fence(chars_block))
+            if not isinstance(characters, list):
+                characters = []
+        except (json.JSONDecodeError, ValueError):
+            print("[scene_analysis]   aviso: CHARACTERS_JSON malformado, ignorando.")
+            characters = []
+
+    if events_block:
+        try:
+            scene_events = json.loads(_strip_code_fence(events_block))
+            if not isinstance(scene_events, dict):
+                scene_events = {}
+        except (json.JSONDecodeError, ValueError):
+            print("[scene_analysis]   aviso: SCENE_EVENTS_JSON malformado, ignorando.")
+            scene_events = {}
+
+    if summary_block:
+        summary = summary_block
+
+    return characters, scene_events, summary
 
 
 def _describe_scene(
@@ -464,12 +640,14 @@ def describe_scenes(
             )
 
             description = ""
+            visual_descriptors: list[dict] = []
+            scene_events: dict = {}
 
             if frame_paths:
 
                 try:
 
-                    description = _describe_scene(
+                    raw_response = _describe_scene(
                         model=model,
                         processor=processor,
                         frame_paths=frame_paths,
@@ -482,6 +660,10 @@ def describe_scenes(
                         do_sample=do_sample,
                     )
 
+                    visual_descriptors, scene_events, description = parse_structured_response(
+                        raw_response
+                    )
+
                 except Exception as error:
 
                     print("[scene_analysis] " f"Erro ao analisar cena: {error}")
@@ -492,6 +674,8 @@ def describe_scenes(
                     "end": end,
                     "description": description,
                     "dialogue": dialogue,
+                    "visual_descriptors": visual_descriptors,
+                    "scene_events": scene_events,
                 }
             )
 
