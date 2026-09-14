@@ -1586,3 +1586,145 @@ def format_character_registry(
         )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Diagnóstico por etapa
+#
+# Objetivo: descobrir EM QUAL ETAPA um erro de identidade aconteceu,
+# em vez de só constatar que "o personagem X está errado".
+#
+#   - um mesmo speaker_id resolvido pra character_id DIFERENTES ao
+#     longo do episódio é sinal de erro de DIARIZAÇÃO ou de
+#     RECONHECIMENTO DE VOZ (a "voz técnica" detectada não é estável,
+#     ou o mapeamento de voz pra personagem errou);
+#   - um character_id com voice_confidence alta mas visual_confidence
+#     baixa/None sugere que a VOZ está confiável mas a ANÁLISE VISUAL
+#     não está contribuindo (ou vice-versa);
+#   - muitas cenas AMBÍGUAS pra um personagem específico apontam pra
+#     um problema na etapa de CONSISTÊNCIA/matching, não na captura
+#     original dos dados.
+# ---------------------------------------------------------------------------
+
+
+def build_speaker_diagnostics(
+    resolved_scenes: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Agrupa por speaker_id (não por personagem): pra cada speaker
+    técnico detectado pela diarização, mostra pra quais character_id
+    ele foi resolvido ao longo do episódio, quantas cenas, e a
+    confiança média. Um speaker com MAIS DE UM character_id associado
+    é a assinatura de um problema de diarização/reconhecimento de voz,
+    não de consistência.
+    """
+    speakers: dict[str, dict[str, Any]] = {}
+
+    for scene in resolved_scenes:
+        mapping = scene.get("speaker_character_mapping", {}) or {}
+
+        for speaker_id, info in mapping.items():
+            entry = speakers.setdefault(
+                speaker_id,
+                {
+                    "character_ids": {},  # character_id -> contagem de cenas
+                    "confidences": [],
+                    "scenes": [],
+                },
+            )
+
+            character_id = info.get("character_id")
+
+            if character_id:
+                entry["character_ids"][character_id] = (
+                    entry["character_ids"].get(character_id, 0) + 1
+                )
+
+            confidence = info.get("confidence")
+            if isinstance(confidence, (int, float)):
+                entry["confidences"].append(confidence)
+
+            entry["scenes"].append(scene.get("scene_id"))
+
+    return speakers
+
+
+def format_speaker_diagnostics(
+    resolved_scenes: list[dict[str, Any]],
+    registry: dict[str, dict[str, Any]],
+) -> str:
+
+    speakers = build_speaker_diagnostics(resolved_scenes)
+
+    lines = []
+    problemas = []
+
+    for speaker_id, data in sorted(speakers.items()):
+
+        character_ids = data["character_ids"]
+        confidences = data["confidences"]
+
+        avg_confidence = (
+            round(sum(confidences) / len(confidences), 4) if confidences else None
+        )
+
+        character_summary = (
+            ", ".join(
+                f"{cid} ({count}x)"
+                for cid, count in sorted(
+                    character_ids.items(), key=lambda item: -item[1]
+                )
+            )
+            or "nenhum"
+        )
+
+        lines.append(
+            f"{speaker_id} | "
+            f"cenas={len(data['scenes'])} | "
+            f"confiança_média={avg_confidence} | "
+            f"personagens={character_summary}"
+        )
+
+        if len(character_ids) > 1:
+            nomes = [registry.get(cid, {}).get("name") or cid for cid in character_ids]
+            problemas.append(
+                f"POSSÍVEL ERRO DE DIARIZAÇÃO/RECONHECIMENTO DE VOZ: "
+                f"{speaker_id} foi resolvido pra {len(character_ids)} "
+                f"personagens diferentes ({', '.join(nomes)}). "
+                f"Isso costuma significar que duas vozes distintas foram "
+                f"agrupadas no mesmo speaker técnico pela diarização, ou "
+                f"que o reconhecimento de voz (voice_profiles) confundiu "
+                f"as vozes."
+            )
+
+    for character_id, character in sorted(registry.items()):
+        voice_conf = character.get("voice_confidence")
+        visual_conf = character.get("visual_confidence")
+
+        if voice_conf is not None and visual_conf is None:
+            problemas.append(
+                f"{character_id} ({character.get('name') or 'sem nome'}): "
+                f"tem evidência de voz (confiança={voice_conf}) mas nenhuma "
+                f"evidência visual associada — a análise visual pode não "
+                f"ter identificado esse personagem em nenhuma cena com "
+                f"confiança suficiente."
+            )
+        elif visual_conf is not None and voice_conf is None:
+            problemas.append(
+                f"{character_id} ({character.get('name') or 'sem nome'}): "
+                f"tem evidência visual (confiança={visual_conf}) mas nenhum "
+                f"speaker de voz associado — pode não ter falado nada "
+                f"nas cenas processadas, ou o reconhecimento de voz não "
+                f"encontrou correspondência."
+            )
+
+    report = ["=== DIAGNÓSTICO POR SPEAKER ===", ""]
+    report.extend(lines if lines else ["(nenhum speaker resolvido)"])
+    report.append("")
+    report.append("=== POSSÍVEIS PROBLEMAS DETECTADOS ===")
+    report.append("")
+    report.extend(
+        problemas if problemas else ["Nenhum problema óbvio detectado automaticamente."]
+    )
+
+    return "\n".join(report)

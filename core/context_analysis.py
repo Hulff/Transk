@@ -836,7 +836,16 @@ Verifique:
 - falas inventadas;
 - detalhes inexistentes;
 - repetições;
-- erros gramaticais.
+- erros gramaticais;
+- características físicas inventadas (ex: altura exata, etnia, idade
+  precisa) que não estão nos descritores visuais originais;
+- roupa ou acessório tratado como se fosse prova de identidade (ex:
+  "é o mesmo personagem porque está com a mesma roupa", ou o oposto,
+  "é outro personagem porque trocou de roupa") — isso é um erro,
+  identidade não se baseia em roupa;
+- características estáveis (cabelo, rosto, pele, porte) descritas de
+  forma inconsistente pro mesmo character_id entre partes diferentes
+  do texto.
 
 IMPORTANTE:
 

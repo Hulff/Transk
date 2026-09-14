@@ -23,6 +23,7 @@ from core.scene_analysis import (
 from core.identity_resolver import (
     resolve_scene_characters,
     format_character_registry,
+    format_speaker_diagnostics,
 )
 
 from core.context_analysis import (
@@ -32,7 +33,6 @@ from core.context_analysis import (
 )
 
 from core.character_consistency import (
-    build_character_sheets,
     apply_character_consistency,
 )
 
@@ -1150,6 +1150,21 @@ def processar(
         )
 
         # ----------------------------------------------------
+        # Diagnóstico por etapa (speaker vs personagem vs voz vs visual)
+        # ----------------------------------------------------
+
+        diagnostico_text = format_speaker_diagnostics(scenes, registry)
+
+        diagnostico_path = (
+            Path(cfg["output"]["output_dir"])
+            / f"{base_name}_diagnostico.txt"
+        )
+        diagnostico_path.parent.mkdir(parents=True, exist_ok=True)
+        diagnostico_path.write_text(diagnostico_text + "\n", encoding="utf-8")
+
+        typer.echo(f"Diagnóstico de identidade salvo em: {diagnostico_path}")
+
+        # ----------------------------------------------------
         # Propaga character_id para as falas
         # ----------------------------------------------------
 
@@ -1212,13 +1227,21 @@ def processar(
             )
 
             # ------------------------------------------------
-            # FICHAS
+            # FICHAS (legado, opcional)
+            #
+            # A identidade agora é resolvida pelo identity_resolver
+            # (character_registry), não por uma ficha em texto livre
+            # gerada pelo LLM. --fichas só é usado se você quiser
+            # carregar um texto de referência de outro episódio; ele
+            # NÃO substitui o registry estruturado.
             # ------------------------------------------------
+
+            sheets = None
 
             if fichas:
 
                 typer.echo(
-                    "Carregando ficha de personagens de: "
+                    "Carregando ficha de referência (texto legado) de: "
                     f"{fichas}"
                 )
 
@@ -1228,35 +1251,6 @@ def processar(
                     encoding="utf-8"
                 )
 
-            elif (
-                not forcar
-                and has_cache(
-                    base_name,
-                    "fichas_personagens",
-                )
-            ):
-
-                typer.echo(
-                    "Fichas de personagens encontradas no cache."
-                )
-
-                sheets = load_cache(
-                    base_name,
-                    "fichas_personagens",
-                )
-
-            else:
-
-                typer.echo(
-                    "Montando fichas de personagens "
-                    "(juntando todas as cenas)..."
-                )
-
-                sheets = build_character_sheets(
-                    contexts,
-                    cfg,
-                )
-
             # ------------------------------------------------
             # REVISÃO MANUAL
             # ------------------------------------------------
@@ -1264,64 +1258,79 @@ def processar(
             if revisar_fichas:
 
                 typer.echo(
-                    "Abrindo ficha de personagens pra revisão..."
+                    "Registro de identidade (resolvido pelo identity_resolver):"
                 )
+                typer.echo(format_character_registry(registry))
 
-                edited = typer.edit(
-                    sheets
-                )
+                if sheets is not None:
 
-                if (
-                    edited is not None
-                    and edited.strip()
-                ):
-                    sheets = edited
+                    typer.echo(
+                        "\nAbrindo ficha de referência (texto legado) pra revisão..."
+                    )
+
+                    edited = typer.edit(
+                        sheets
+                    )
+
+                    if (
+                        edited is not None
+                        and edited.strip()
+                    ):
+                        sheets = edited
+                else:
+                    typer.echo(
+                        "(Nenhuma ficha de referência em texto carregada via "
+                        "--fichas — a identidade é controlada pelo registry "
+                        "acima, não por um texto editável neste momento.)"
+                    )
 
             # ------------------------------------------------
-            # CACHE DA FICHA
+            # CACHE DA FICHA (só se houver ficha de referência)
             # ------------------------------------------------
 
-            save_cache(
-                base_name,
-                "fichas_personagens",
-                sheets,
-            )
+            if sheets is not None:
 
-            fichas_path = (
-                Path(
-                    cfg[
-                        "output"
-                    ][
-                        "output_dir"
-                    ]
+                save_cache(
+                    base_name,
+                    "fichas_personagens",
+                    sheets,
                 )
-                / (
-                    f"{base_name}"
-                    "_fichas_personagens.txt"
+
+                fichas_path = (
+                    Path(
+                        cfg[
+                            "output"
+                        ][
+                            "output_dir"
+                        ]
+                    )
+                    / (
+                        f"{base_name}"
+                        "_fichas_personagens.txt"
+                    )
                 )
-            )
 
-            fichas_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
+                fichas_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
 
-            fichas_path.write_text(
-                sheets.strip()
-                + "\n",
-                encoding="utf-8",
-            )
+                fichas_path.write_text(
+                    sheets.strip()
+                    + "\n",
+                    encoding="utf-8",
+                )
 
-            typer.echo(
-                "Ficha de personagens salva em: "
-                f"{fichas_path}"
-            )
+                typer.echo(
+                    "Ficha de referência salva em: "
+                    f"{fichas_path}"
+                )
 
-            typer.echo(
-                "(reaproveite em outro episódio da mesma "
-                "série com "
-                f"--fichas {fichas_path})"
-            )
+                typer.echo(
+                    "(reaproveite em outro episódio da mesma "
+                    "série com "
+                    f"--fichas {fichas_path})"
+                )
 
             # ------------------------------------------------
             # REESCRITA
@@ -1336,6 +1345,7 @@ def processar(
                     contexts,
                     sheets,
                     cfg,
+                    character_registry=registry,
                 )
             )
 
@@ -1366,11 +1376,22 @@ def processar(
                     "needs_visual_review"
                 ]
 
-                scene[
-                    "review_reason"
-                ] = result[
-                    "review_reason"
+                # A versão atual do character_consistency não retorna mais
+                # um "motivo" textual (a ambiguidade vem do status
+                # AMBÍGUO do identity_resolver, não de uma explicação do
+                # LLM) — deriva um motivo genérico a partir do registry
+                # pra manter o relatório de revisão pendente legível.
+                ambiguous_refs = [
+                    item.get("scene_character_ref") or item.get("character_id")
+                    for item in scene.get("resolved_characters", [])
+                    if isinstance(item, dict) and item.get("status") == "AMBÍGUO"
                 ]
+
+                scene["review_reason"] = result.get("review_reason") or (
+                    f"Identidade ambígua: {', '.join(str(r) for r in ambiguous_refs if r)}"
+                    if ambiguous_refs
+                    else "Identidade não confirmada pelo identity_resolver."
+                )
 
             save_cache(
                 base_name,
@@ -2049,4 +2070,3 @@ def dataset_exportar(
 
 if __name__ == "__main__":
     app()
-
